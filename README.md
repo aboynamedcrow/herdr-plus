@@ -430,8 +430,9 @@ Binding has these limits:
   checkout, which is what herdr requires. Open the primary-checkout project
   first. Otherwise this plugin refuses before creating anything: native grouping
   would create an empty parent that could later shadow the primary project's
-  configured layout. Binding names the verified parent workspace explicitly, so
-  closing it during the operation produces an error, not another parent.
+  configured layout. Binding names the verified parent workspace explicitly.
+  Keep it open until completion: Herdr 0.9 may recreate a parent closed while
+  its asynchronous Git operation is running.
 - If herdr reports an open workspace in your project's checkout but it carries no
   provenance (including a scratch workspace whose shell entered that checkout), the open is
   **refused** with a message naming it. Nothing is created and nothing is
@@ -485,6 +486,12 @@ addresses that workspace explicitly. Keep the primary open until creation
 finishes: Herdr 0.9 can select or create a replacement parent if it disappears
 during the asynchronous Git operation. Plus does not control that native
 completion behavior or run a second creation attempt.
+
+Plus rechecks branch presence and checkout registration after preparation, just
+before submission. Herdr 0.9 does not atomically reserve that Git state: another
+actor creating the same branch during native execution can cause Herdr to reuse
+that branch instead of the supplied base commit. Avoid concurrent creation of the
+same branch until the operation finishes; Plus never resets it or retries.
 
 For external callers, `plan-worktree --cwd /absolute/checkout --name "description"
 --issue IC-177` returns versioned JSON with `candidates` and a `fingerprint`.

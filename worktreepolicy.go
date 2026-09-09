@@ -355,13 +355,16 @@ func planWorktree(req worktreeRequest) (worktreePlan, error) {
 			req.Issue = match[1]
 		}
 	}
-	branch, err := policyBranch(cfg.Worktree.BranchPrefix, req.Name, req.Issue, policy.MaxTail)
+	// Validate configuration independently from a hypothetical new name.
+	// Existing branch names and issue matches need no normalization.
+	probe, err := policyBranch(cfg.Worktree.BranchPrefix, "valid", "", policy.MaxTail)
 	if err != nil {
 		return plan, err
 	}
-	if err := ensureBranchName(primary, "branch", branch); err != nil {
+	if err := ensureBranchName(primary, "branch prefix", probe); err != nil {
 		return plan, err
 	}
+	branch, nameErr := policyBranch(cfg.Worktree.BranchPrefix, req.Name, req.Issue, policy.MaxTail)
 	refs, err := ensureGit(primary, 10*time.Second, "for-each-ref", "--format=%(refname)%00%(objectname)", "refs/heads/")
 	if err != nil {
 		return plan, err
@@ -413,6 +416,12 @@ func planWorktree(req worktreeRequest) (worktreePlan, error) {
 		plan.Candidates = append(plan.Candidates, worktreeChoice{Branch: name, Path: path, Existing: true, Checkout: checkedOut})
 	}
 	if len(plan.Candidates) == 0 {
+		if nameErr != nil {
+			return plan, nameErr
+		}
+		if err := ensureBranchName(primary, "branch", branch); err != nil {
+			return plan, err
+		}
 		plan.Base, plan.BaseOID, err = policyRemoteBase(primary, policy.Base)
 		if err != nil {
 			return plan, err

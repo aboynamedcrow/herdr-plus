@@ -117,7 +117,8 @@ func (s *worktreeSelection) verifyBranchPresence(branch string, absent bool) err
 // `run_worktree_add_command` into the start-point argument of
 // `git worktree add -b <branch> <path> <base>` with no branch-only validation
 // (pinned `src/app/api/worktrees/deferred.rs` and `src/worktree.rs`), so an
-// object id is accepted there and nothing can move underneath it.
+// object id is accepted there. Native uses this start point only if the branch
+// is still absent when its asynchronous Git operation runs.
 func (s *worktreeSelection) verifyBase(root, ref string) (string, error) {
 	if !isObjectID(s.BaseOID) {
 		return "", fmt.Errorf("the accepted plan carries no verified base commit for %s; %w", s.Branch, errWorktreeSelectionChanged)
@@ -324,6 +325,31 @@ func ensureWorktreeSelected(args []string, want *worktreeSelection) (json.RawMes
 		}
 		delete(params, "cwd")
 		params["workspace_id"] = workspace
+	}
+	// Fetch and native parent lookup can be slow. Refuse a selection whose
+	// Git meaning changed during those preparations, just before submission.
+	// Native execution is asynchronous; this is not an atomic Git lock.
+	if want != nil {
+		listing, err := ensureGit(canonical, 10*time.Second, "worktree", "list", "--porcelain", "-z")
+		if err != nil {
+			return nil, err
+		}
+		registered, err := ensureRegisteredPath(canonical, listing, branch)
+		if err != nil {
+			return nil, err
+		}
+		if err := want.verifyGitState(canonical, branch, path, registered); err != nil {
+			return nil, err
+		}
+		_, err = ensureGit(canonical, 10*time.Second, "show-ref", "--verify", "--quiet", "refs/heads/"+branch)
+		var exitErr *exec.ExitError
+		absent := errors.As(err, &exitErr) && exitErr.ExitCode() == 1
+		if err != nil && !absent {
+			return nil, err
+		}
+		if err := want.verifyBranchPresence(branch, absent); err != nil {
+			return nil, err
+		}
 	}
 	var result json.RawMessage
 	if err := client.call(method, params, &result); err != nil {

@@ -54,6 +54,20 @@ type PluginConfig struct {
 		// `plugin pane open --placement`). Empty keeps the built-in default,
 		// zoomed.
 		Placement string `toml:"placement"`
+
+		// CrewTab is the label of the tab the Projects action returns to when it
+		// fires inside a linked-worktree workspace — the task tab you were already
+		// working in. Empty (the default) turns the behavior off entirely and keeps
+		// the upstream picker-only action, so no Crew name is baked into the
+		// plugin: a machine that wants this policy names its own tab here.
+		CrewTab string `toml:"crew_tab"`
+
+		// ReuseCheckout makes opening a project focus the workspace that already
+		// has that exact checkout open instead of creating a second one. Default
+		// false keeps the upstream always-create behavior; identity is the
+		// canonical checkout path herdr records for a workspace, never a label or
+		// a shared repository key (see reuseOpenCheckout).
+		ReuseCheckout bool `toml:"reuse_checkout"`
 	} `toml:"projects"`
 
 	QuickActions struct {

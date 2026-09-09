@@ -9,7 +9,9 @@ package main
 import (
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"os"
+	"strings"
 )
 
 // RunContext is the bag of variables herdr-plus exposes to an action's command.
@@ -109,6 +111,30 @@ type pluginContext struct {
 	FocusedPaneID    string `json:"focused_pane_id"`
 	FocusedPaneCwd   string `json:"focused_pane_cwd"`
 	FocusedPaneAgent string `json:"focused_pane_agent"`
+
+	// Worktree is the checkout herdr says the invoking workspace holds, nil when
+	// it holds none. It is a claim made when the action fired, so the Projects
+	// action re-reads the same provenance live before acting on it.
+	Worktree *worktreeProvenance `json:"worktree"`
+}
+
+// pluginContextFromEnv decodes HERDR_PLUGIN_CONTEXT_JSON, the explicit
+// per-invocation context herdr injects describing the pane the action fired
+// from. Unlike contextFromPluginEnv it is strict: an unset variable yields an
+// empty context (the action simply has no identity to work from), but a
+// malformed one is an error. That distinction matters for the Projects action —
+// silently reading a broken context as "no workspace" would look exactly like
+// "not a task workspace" and open a picker that goes on to create a duplicate.
+func pluginContextFromEnv() (pluginContext, error) {
+	var pc pluginContext
+	raw := strings.TrimSpace(os.Getenv("HERDR_PLUGIN_CONTEXT_JSON"))
+	if raw == "" {
+		return pc, nil
+	}
+	if err := json.Unmarshal([]byte(raw), &pc); err != nil {
+		return pluginContext{}, fmt.Errorf("malformed HERDR_PLUGIN_CONTEXT_JSON: %w", err)
+	}
+	return pc, nil
 }
 
 // contextFromPluginEnv builds a RunContext from HERDR_PLUGIN_CONTEXT_JSON, which
@@ -117,10 +143,10 @@ type pluginContext struct {
 // cwd. Any field herdr does not supply is left empty — a partial context is far
 // better than refusing to launch.
 func contextFromPluginEnv() RunContext {
-	var pc pluginContext
-	if raw := os.Getenv("HERDR_PLUGIN_CONTEXT_JSON"); raw != "" {
-		_ = json.Unmarshal([]byte(raw), &pc)
-	}
+	// A malformed context is deliberately ignored here: a quick action would
+	// rather launch with no metadata than refuse to open. The Projects action
+	// calls pluginContextFromEnv directly, where the same input is an error.
+	pc, _ := pluginContextFromEnv()
 	return RunContext{
 		WorkDir:        firstNonEmpty(pc.FocusedPaneCwd, pc.WorkspaceCwd),
 		PaneId:         pc.FocusedPaneID,

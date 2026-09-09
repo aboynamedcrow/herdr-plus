@@ -18,7 +18,8 @@ import (
 // manifest entry point.
 //
 //   - "projects" / "quick-actions" are the actions herdr runs from a keybinding:
-//     each asks herdr to open its UI as a plugin pane.
+//     each asks herdr to open its UI as a plugin pane. "projects --pick" always
+//     opens the picker, even where bare "projects" would return to a task tab.
 //   - "projects-ui" / "quick-actions-ui" are those UIs; herdr runs them inside the
 //     pane it opens (the `picker` / `quick-actions-picker` entrypoints), so end
 //     users never run them directly.
@@ -35,7 +36,7 @@ func main() {
 	if len(os.Args) > 1 {
 		switch os.Args[1] {
 		case "projects":
-			launchProjects()
+			launchProjects(os.Args[2:])
 			return
 		case "projects-ui":
 			runProjectsUI()

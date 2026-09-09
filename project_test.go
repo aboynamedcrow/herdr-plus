@@ -9,6 +9,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -440,5 +441,119 @@ func TestResolvePaneDirs(t *testing.T) {
 	}
 	if _, err := resolvePaneDirs(root, []ProjectTab{{Name: "api", WorkingDir: "README"}}); err == nil {
 		t.Fatal("expected a file working_dir to be rejected")
+	}
+}
+
+// TestValidateSplitFrom covers the declarative split target: a pane may name an
+// earlier pane in its own tab to split off, and anything that is not an earlier
+// pane is rejected at config load — before any workspace, tab or pane exists.
+func TestValidateSplitFrom(t *testing.T) {
+	tab := func(splitFroms ...int) []ProjectTab {
+		panes := make([]ProjectPane, len(splitFroms))
+		for i, sf := range splitFroms {
+			panes[i] = ProjectPane{Split: SplitRight, SplitFrom: sf}
+		}
+		return []ProjectTab{{Name: "work", Panes: panes}}
+	}
+
+	cases := []struct {
+		name    string
+		tabs    []ProjectTab
+		wantErr string
+	}{
+		{name: "omitted keeps the previous-pane default", tabs: tab(0, 0, 0, 0)},
+		{name: "the full-height edge shape", tabs: tab(0, 1, 1, 3)},
+		{name: "an earlier pane is fine", tabs: tab(0, 1, 2, 2)},
+		{name: "first pane cannot split from anything", tabs: tab(1, 0), wantErr: "pane 1"},
+		{name: "negative is rejected", tabs: tab(0, -1), wantErr: "split_from"},
+		{name: "splitting from itself is rejected", tabs: tab(0, 2), wantErr: "split_from"},
+		{name: "a forward reference is rejected", tabs: tab(0, 3, 0), wantErr: "split_from"},
+		{name: "a pane that does not exist is rejected", tabs: tab(0, 9), wantErr: "split_from"},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			err := validateTabs("proj", "proj.toml", c.tabs)
+			if c.wantErr == "" {
+				if err != nil {
+					t.Fatalf("validateTabs: %v", err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatal("want a validation error, got none")
+			}
+			if !strings.Contains(err.Error(), c.wantErr) {
+				t.Fatalf("error %q does not mention %q", err, c.wantErr)
+			}
+		})
+	}
+}
+
+// TestLoadProjectsParsesSplitFrom confirms split_from survives the TOML round
+// trip and that a project declaring an impossible one fails to load at all,
+// naming the file — the same loud failure every other config mistake gets.
+func TestLoadProjectsParsesSplitFrom(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HERDR_PLUGIN_CONFIG_DIR", dir)
+	projects := filepath.Join(dir, "projects")
+	if err := os.MkdirAll(projects, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	good := `
+name = "crew"
+working_dir = "~"
+
+[[tabs]]
+name = "Crew"
+
+  [[tabs.panes]]
+  label = "Orchestrator"
+
+  [[tabs.panes]]
+  label = "Issue"
+  split = "right"
+  split_from = 1
+  ratio = 0.25
+
+  [[tabs.panes]]
+  label = "Worker 1"
+  split = "right"
+  split_from = 1
+
+  [[tabs.panes]]
+  label = "Worker 2"
+  split = "down"
+  split_from = 3
+`
+	if err := os.WriteFile(filepath.Join(projects, "crew.toml"), []byte(good), 0o644); err != nil {
+		t.Fatalf("write project: %v", err)
+	}
+
+	loaded, err := loadProjects()
+	if err != nil {
+		t.Fatalf("loadProjects: %v", err)
+	}
+	if len(loaded) != 1 {
+		t.Fatalf("loaded %d projects, want 1", len(loaded))
+	}
+	panes := loaded[0].Tabs[0].effectivePanes()
+	if len(panes) != 4 {
+		t.Fatalf("panes = %d, want 4", len(panes))
+	}
+	if panes[0].SplitFrom != 0 {
+		t.Fatalf("root pane SplitFrom = %d, want 0", panes[0].SplitFrom)
+	}
+	if panes[1].SplitFrom != 1 || panes[2].SplitFrom != 1 || panes[3].SplitFrom != 3 {
+		t.Fatalf("split targets = %d/%d/%d, want 1/1/3", panes[1].SplitFrom, panes[2].SplitFrom, panes[3].SplitFrom)
+	}
+
+	bad := "name = \"bad\"\nworking_dir = \"~\"\n\n[[tabs]]\nname = \"t\"\n\n  [[tabs.panes]]\n\n  [[tabs.panes]]\n  split_from = 5\n"
+	if err := os.WriteFile(filepath.Join(projects, "bad.toml"), []byte(bad), 0o644); err != nil {
+		t.Fatalf("write project: %v", err)
+	}
+	if _, err := loadProjects(); err == nil || !strings.Contains(err.Error(), "bad.toml") {
+		t.Fatalf("want a load error naming bad.toml, got %v", err)
 	}
 }

@@ -9,8 +9,8 @@
 # cross-compiles the binary, archives it, attaches it to a GitHub Release, and
 # pushes an updated Homebrew formula into Formula/ in this same repo.
 #
-# These prebuilt archives are also what `herdr plugin install` downloads when the
-# machine has no Go toolchain (see scripts/build.sh).
+# These prebuilt archives support standalone installation. Plugin installation
+# builds the checked-out source with Go (see scripts/build.sh).
 
 version: 2
 

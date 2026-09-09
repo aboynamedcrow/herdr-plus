@@ -200,22 +200,35 @@ func ensureGit(cwd string, timeout time.Duration, args ...string) ([]byte, error
 	return out, nil
 }
 
+// gitWorktreeRecord is one entry of `git worktree list --porcelain -z`: the
+// checkout's path plus the state Git registers for it. It is shared by the
+// ensure-worktree command and the Projects checkout binding so both read Git's
+// registry through one strict parser rather than two.
+type gitWorktreeRecord struct {
+	Path string
+	// Ref is the full "refs/heads/<name>" a checkout has on a branch, empty when
+	// it is detached or bare.
+	Ref      string
+	Detached bool
+	Bare     bool
+}
+
 // Porcelain -z uses NUL fields and an empty field between records, preserving
 // spaces, newlines and quotes in paths. A broken query is never branch absence.
-func ensureRegisteredPath(cwd string, data []byte, branch string) (string, error) {
+func parseGitWorktreeList(cwd string, data []byte) ([]gitWorktreeRecord, error) {
 	bad := errors.New("malformed git worktree list output")
 	if len(data) == 0 || !bytes.HasSuffix(data, []byte{0, 0}) {
-		return "", bad
+		return nil, bad
 	}
-	var selected string
+	var records []gitWorktreeRecord
 	for _, record := range strings.Split(string(data[:len(data)-2]), "\x00\x00") {
 		fields := strings.Split(record, "\x00")
 		if !strings.HasPrefix(fields[0], "worktree ") {
-			return "", bad
+			return nil, bad
 		}
 		path := strings.TrimPrefix(fields[0], "worktree ")
 		if !filepath.IsAbs(path) {
-			return "", bad
+			return nil, bad
 		}
 		var head, ref string
 		var detached, bare bool
@@ -223,53 +236,67 @@ func ensureRegisteredPath(cwd string, data []byte, branch string) (string, error
 		for _, field := range fields[1:] {
 			key, value, hasValue := strings.Cut(field, " ")
 			if seen[key] {
-				return "", bad
+				return nil, bad
 			}
 			seen[key] = true
 			switch key {
 			case "HEAD":
 				if !hasValue || (len(value) != 40 && len(value) != 64) {
-					return "", bad
+					return nil, bad
 				}
 				if _, err := hex.DecodeString(value); err != nil {
-					return "", bad
+					return nil, bad
 				}
 				head = value
 			case "branch":
 				if !strings.HasPrefix(value, "refs/heads/") || len(value) == len("refs/heads/") {
-					return "", bad
+					return nil, bad
 				}
 				if _, err := ensureGit(cwd, 10*time.Second, "check-ref-format", value); err != nil {
-					return "", fmt.Errorf("malformed git worktree branch: %w", err)
+					return nil, fmt.Errorf("malformed git worktree branch: %w", err)
 				}
 				ref = value
 			case "detached":
 				if hasValue {
-					return "", bad
+					return nil, bad
 				}
 				detached = true
 			case "bare":
 				if hasValue {
-					return "", bad
+					return nil, bad
 				}
 				bare = true
 			case "locked", "prunable": // Optional reason is an opaque NUL-delimited field.
 			default:
-				return "", bad
+				return nil, bad
 			}
 		}
 		if bare {
 			if head != "" || ref != "" || detached {
-				return "", bad
+				return nil, bad
 			}
 		} else if head == "" || (ref == "" && !detached) || (ref != "" && detached) {
-			return "", bad
+			return nil, bad
 		}
-		if ref == "refs/heads/"+branch {
+		records = append(records, gitWorktreeRecord{Path: path, Ref: ref, Detached: detached, Bare: bare})
+	}
+	return records, nil
+}
+
+// ensureRegisteredPath returns the checkout path Git has registered for branch,
+// or "" when the branch has no worktree. A broken query is never branch absence.
+func ensureRegisteredPath(cwd string, data []byte, branch string) (string, error) {
+	records, err := parseGitWorktreeList(cwd, data)
+	if err != nil {
+		return "", err
+	}
+	var selected string
+	for _, record := range records {
+		if record.Ref == "refs/heads/"+branch {
 			if selected != "" {
 				return "", errors.New("ambiguous git worktree registration for branch")
 			}
-			selected = path
+			selected = record.Path
 		}
 	}
 	return selected, nil

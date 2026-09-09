@@ -26,9 +26,10 @@ platforms = ["linux", "macos", "windows"]
 # Produce the binary at install time. herdr runs this once, after you confirm a
 # GitHub install and before registering the plugin.
 #
-# Unix: the sh script prefers a local Go toolchain (an exact build of the cloned
-# source) and falls back to downloading the latest prebuilt release binary, so
-# installing works with or without Go. The result is ./bin/herdr-plus.
+# Unix: the sh script builds the cloned source with a local Go toolchain, which is
+# required — there is no fallback to a prebuilt release binary, since a published
+# release would not contain the code herdr just checked out. A missing toolchain
+# fails the install with instructions. The result is ./bin/herdr-plus.
 [[build]]
 platforms = ["linux", "macos"]
 command = ["sh", "scripts/build.sh"]
@@ -75,6 +76,24 @@ id = "projects-windows"
 title = "Herdr Plus: Projects"
 platforms = ["windows"]
 command = ["powershell", "-NoProfile", "-NonInteractive", "-Command", "& .\\bin\\herdr-plus.exe projects"]
+
+# projects-pick — the explicit "choose another project" entry. The plain
+# projects action above returns to the current task tab when [projects].crew_tab
+# is configured and it fires inside a linked worktree workspace; this one always
+# opens the browser, whatever it was invoked from. Bind a second key to it, or
+# run it from herdr's action menu, when you want a different project from inside
+# one you are already working in.
+[[actions]]
+id = "projects-pick"
+title = "Herdr Plus: Projects (pick another)"
+platforms = ["linux", "macos"]
+command = ["./bin/herdr-plus", "projects", "--pick"]
+
+[[actions]]
+id = "projects-pick-windows"
+title = "Herdr Plus: Projects (pick another)"
+platforms = ["windows"]
+command = ["powershell", "-NoProfile", "-NonInteractive", "-Command", "& .\\bin\\herdr-plus.exe projects --pick"]
 
 # picker — the projects browser as a herdr-managed pane (no throwaway workspace).
 # Opened by the projects action via `herdr plugin pane open`; herdr gives it a

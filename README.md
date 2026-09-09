@@ -19,18 +19,18 @@ herdr plugin install cloudmanic/herdr-plus
 ```
 
 herdr clones the repo, runs the manifest's `[[build]]` step, and registers the
-actions. That step **prefers a local Go toolchain** (an exact build of the source)
-and **falls back to downloading the latest prebuilt release binary**, so it works
-**with or without Go**. Manage it with `herdr plugin list`,
+actions. That step builds **the source herdr just checked out**, so **Go must be
+on your `PATH`** — there is no fallback to a prebuilt release binary, which would
+not contain the code in that checkout. A missing toolchain fails the install with
+instructions rather than quietly installing something else. Manage it with
+`herdr plugin list`,
 `herdr plugin action list --plugin cloudmanic.herdr-plus`, and
 `herdr plugin uninstall cloudmanic.herdr-plus`.
 
 > **Windows** (herdr's Windows support is in preview): the plugin installs and
-> runs on Windows, but its build step compiles straight from source with the Go
-> toolchain — there's **no prebuilt-binary fallback** like the Linux/macOS `sh`
-> script has — so **Go must be on your `PATH`** to `herdr plugin install`. The
-> plugin talks to herdr over a named pipe there instead of a unix socket; it's
-> validated against the herdr Windows beta.
+> runs on Windows the same way — its build step compiles straight from source, so
+> **Go must be on your `PATH`**. The plugin talks to herdr over a named pipe there
+> instead of a unix socket; it's validated against the herdr Windows beta.
 
 **Local development:** build the binary and link your checkout in place:
 
@@ -78,11 +78,16 @@ Optional global settings live in `config.toml` in that same directory:
 branch_prefix = "your-name/" # used verbatim; include your own trailing /
 
 [projects]
-placement = "zoomed" # overlay, popup, split, tab, or zoomed; default is zoomed
+placement = "zoomed"     # overlay, popup, split, tab, or zoomed; default is zoomed
+crew_tab = ""            # empty (default) off; a tab label turns on "return to my task tab"
+reuse_checkout = false   # default false; true focuses an already-open checkout
 
 [quick_actions]
 placement = "overlay" # overlay, popup, split, tab, or zoomed; default is overlay
 ```
+
+`crew_tab` and `reuse_checkout` are both off by default, and both are described
+under [Returning to work you already have open](#returning-to-work-you-already-have-open).
 
 `placement` controls how herdr opens each picker — see herdr's
 [`plugin pane open --placement`](https://herdr.dev/docs/plugins/#panes) for what
@@ -96,6 +101,9 @@ default and prints a warning to stderr rather than being passed through to herdr
 Pick a project from a full-screen fuzzy browser and herdr-plus builds its whole
 workspace. Trigger it from herdr's plugin action menu, or
 [bind a key](#binding-a-key) — the action is `cloudmanic.herdr-plus.projects`.
+(With `[projects].crew_tab` configured the action returns to your current task
+tab instead of opening the browser — see
+[Returning to work you already have open](#returning-to-work-you-already-have-open).)
 Inside the browser, **Enter** opens the highlighted project as a normal workspace;
 **ctrl+g** opens it as a git worktree. The worktree prompt accepts an optional
 branch name: empty lets herdr generate `worktree/...`, bare names get the optional
@@ -296,6 +304,145 @@ ratio = 0.3
 ```
 
 A tab uses *either* `command` *or* `[[tabs.panes]]`, not both.
+
+#### Choosing which pane to split
+
+By default each pane splits the one created just before it, which is a chain: A,
+then B off A, then C off B. Some arrangements cannot be written that way. A tab
+with a full-height pane down one edge and a stack of panes beside it needs the
+stacked panes to split *each other*, not the edge — otherwise the edge pane is
+cut in half by the second split.
+
+`split_from` says which pane to split, as a 1-based index of an **earlier pane in
+the same tab**. Omitted (or `0`) keeps the previous-pane default, so existing
+configs are unchanged.
+
+```toml
+[[tabs]]
+name = "Work"
+
+[[tabs.panes]]
+label = "Notes"          # pane 1, the tab's root
+
+[[tabs.panes]]
+label = "Editor"         # pane 2 splits pane 1, keeping Notes full height
+split = "right"
+split_from = 1
+ratio = 0.75
+
+[[tabs.panes]]
+label = "Tests"          # pane 3 splits pane 2, stacking under the editor
+split = "down"
+split_from = 2
+```
+
+The first pane is the tab's root and splits nothing, so it must leave `split_from`
+unset. A value that is not an earlier pane — its own index, a later pane, one that
+does not exist — is refused when the file is read, before any workspace is
+created. Creation order can differ from the visual arrangement; `label`, `ratio`,
+`working_dir` and startup commands all behave exactly as they did.
+
+## Returning to work you already have open
+
+Both settings below are opt-in and off by default. They exist for the same
+situation: you already have the thing you are about to open, and creating a
+second copy of it is not what you meant.
+
+Neither one ever re-runs a layout, re-creates a tab or pane, or types into a
+pane. Returning to work leaves that work exactly as you left it.
+
+### `crew_tab` — the Projects key returns to your task tab
+
+Set `crew_tab` to the label of the tab you work in:
+
+```toml
+[projects]
+crew_tab = "Crew"
+```
+
+With it set, the Projects action checks the pane it was invoked from. If that
+pane is in a workspace herdr opened for a **linked git worktree**, and that
+workspace has exactly one tab with this label, the action focuses that tab
+instead of opening the browser. Pressing the key again just focuses it again.
+
+Anywhere else — a plain folder, a repository's main checkout, no context at all —
+the browser opens exactly as before.
+
+If the tab has been renamed, closed, or exists more than once, you get a message
+saying so and **nothing is created**: herdr-plus will not invent a second task
+tab or guess which of two is yours. A failed lookup is likewise an error, never
+silently treated as "not a task workspace".
+
+The tab label is entirely yours — no name is built into the plugin. Leaving
+`crew_tab` empty keeps the plain picker-only behavior.
+
+To open a *different* project from inside one you are working in, use the
+separate `cloudmanic.herdr-plus.projects-pick` action (or run the binary with
+`projects --pick`). It always opens the browser.
+
+### `reuse_checkout` — opening a project focuses it if it is already open
+
+```toml
+[projects]
+reuse_checkout = true
+```
+
+With it on, choosing a project first asks herdr whether any open workspace
+already has that exact directory checked out. If one does, it is focused, and no
+workspace, tab, pane or startup command is created.
+
+"Exact" means the canonical filesystem path, so a symlinked alias of an open
+checkout counts as the same checkout. Two worktrees of the same repository do
+**not**: they share a repository, not a checkout, so opening the second one
+builds it. Matching never uses a workspace's title.
+
+If two workspaces somehow hold the same checkout, you are asked which one, by
+herdr's own workspace id — nothing is picked for you, and cancelling does
+nothing at all. If herdr cannot be asked, or the directory cannot be resolved,
+that is an error rather than an assumption that nothing matched.
+
+Headless `herdr-plus open <name>` honors the same setting, except that it has
+nobody to ask: several matching workspaces is an error naming them.
+
+Because herdr records checkout provenance only for workspaces it opened as a
+worktree — not for the ones this plugin creates — a project workspace is bound to
+its checkout right after it is built, by asking herdr to open the checkout it
+already has open. herdr recognizes the workspace, records the checkout, and
+leaves its tabs, panes and running commands untouched; the next open then finds
+it. If that binding fails you are told so at the time, and the workspace itself
+is left alone and perfectly usable.
+
+Whether a project is a Git checkout at all is herdr's answer, not a guess: if
+herdr says the directory is not inside a Git work tree, the project opens as it
+always has. If Git itself cannot be read — no `git` on `PATH`, a corrupt or
+unreadable registry, a listing that contradicts herdr — you get an error *before*
+anything is created, because at that point nobody can tell whether the project is
+already open, and a wrong guess is the duplicate workspace this is meant to
+prevent.
+
+Binding has these limits:
+
+- Binding a **linked worktree** asks herdr to act from the repository's primary
+  checkout, which is what herdr requires. Open the primary-checkout project
+  first. Otherwise this plugin refuses before creating anything: native grouping
+  would create an empty parent that could later shadow the primary project's
+  configured layout. Binding names the verified parent workspace explicitly, so
+  closing it during the operation produces an error, not another parent.
+- If herdr reports an open workspace in your project's checkout but it carries no
+  provenance (including a scratch workspace whose shell entered that checkout), the open is
+  **refused** with a message naming it. Nothing is created and nothing is
+  changed: that workspace cannot be verified as your project, and guessing is
+  exactly what this feature refuses to do. Inspect it and close it when safe, or
+  open the checkout through herdr's own worktree open, and try again.
+- Reuse requires a repository herdr can list and a non-bare primary checkout.
+  Bare-main repositories are unsupported with this opt-in setting; turn it off
+  to retain the original project-opening behavior. Repository trust errors are
+  reported without granting trust automatically.
+
+**Limitations:** identity comes from the checkout herdr records for a workspace,
+so this applies to projects whose `working_dir` is a git checkout root. A project
+pointing at a plain (non-git) directory, or at a *subdirectory* of a checkout,
+has no such provenance and keeps the old behavior — a new workspace every time.
 
 ## Quick Actions
 

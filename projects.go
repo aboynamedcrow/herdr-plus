@@ -23,12 +23,53 @@ import (
 // herdr-plugin.toml) — zoomed by default, or the placement set by
 // [projects].placement in config.toml. herdr creates and tears down that pane for
 // us, so — unlike the old design — there is no throwaway workspace to manage.
-func launchProjects() {
+//
+// With [projects].crew_tab configured the action gains one step in front of that:
+// fired from inside a linked worktree workspace, it returns to that workspace's
+// task tab instead of offering a picker, so the same key both starts work and
+// comes back to it. Nothing is created or relaid on that path — see returnToCrew.
+// `projects --pick` skips the step entirely when you do want another project.
+func launchProjects(args []string) {
+	pick, err := parseProjectsArgs(args)
+	if err != nil {
+		errExit(err)
+	}
+
 	cfg, err := loadPluginConfig()
 	if err != nil {
 		errExit(err)
 	}
 	placement := resolvePlacement(cfg.Projects.Placement, "zoomed")
+
+	// The context herdr injected for this invocation: the pane the action fired
+	// from. It decides whether there is a Crew to return to, and is forwarded to
+	// the picker pane so the browser runs with the caller's directory in hand.
+	ctx := contextFromPluginEnv()
+
+	if !pick && strings.TrimSpace(cfg.Projects.CrewTab) != "" {
+		pc, err := pluginContextFromEnv()
+		if err != nil {
+			errExit(err)
+		}
+		if strings.TrimSpace(pc.WorkspaceID) != "" {
+			client, err := newHerdrClient()
+			if err != nil {
+				errExit(err)
+			}
+			focused, err := returnToCrew(client, pc, cfg.Projects.CrewTab)
+			if err != nil {
+				errExit(err)
+			}
+			if focused {
+				return
+			}
+		}
+	}
+
+	enc, err := ctx.encode()
+	if err != nil {
+		errExit("could not encode run context:", err)
+	}
 
 	// HERDR_BIN_PATH points at the running herdr binary; it is the portable way to
 	// call back into the CLI from a plugin command.
@@ -37,10 +78,16 @@ func launchProjects() {
 		herdr = "herdr"
 	}
 
+	// IMPORTANT: no --cwd. The manifest registers this pane with a relative
+	// command (./bin/herdr-plus), which herdr resolves against the pane's working
+	// directory, so the pane must run in the plugin's own install dir. The user's
+	// directory is context data, not an executable lookup path, and reaches the
+	// browser through HERDR_PLUS_CTX — the same way Quick Actions forwards it.
 	cmd := exec.Command(herdr, "plugin", "pane", "open",
 		"--plugin", pluginID,
 		"--entrypoint", paneEntrypoint("picker"),
 		"--placement", placement,
+		"--env", "HERDR_PLUS_CTX="+enc,
 	)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
@@ -93,17 +140,28 @@ func runProjectsUI() {
 		}
 		return
 	}
-	if err := openProject(client, *m.chosen); err != nil {
+	// With [projects].reuse_checkout on, a project whose checkout is already open
+	// focuses that workspace instead of building a second one; several matches ask
+	// which, in this same pane, before anything happens. See reuseOpenCheckout.
+	reuse := reuseOptions{enabled: cfg.Projects.ReuseCheckout}
+	if reuse.enabled {
+		reuse.choose = func(candidates []workspaceCandidate) (workspaceCandidate, bool, error) {
+			return chooseWorkspaceInteractively(candidates, m.chosen.displayWorkingDir())
+		}
+	}
+	if err := openProject(client, *m.chosen, reuse); err != nil {
 		errExit("could not open project:", err)
 	}
 }
 
 // openProject turns a project into a live herdr workspace: it creates a focused
 // workspace rooted at the project's working directory and lays out its tabs and
-// panes, running each startup command. Creating the focused workspace switches
+// panes, running each startup command — unless reuse is enabled and that exact
+// checkout is already open, in which case the existing workspace is focused and
+// nothing is created. Creating the focused workspace switches
 // the user to it; the picker pane this was launched from is then torn down by
 // herdr when runProjectsUI exits.
-func openProject(client *herdrClient, p Project) error {
+func openProject(client *herdrClient, p Project, reuse reuseOptions) error {
 	dir, err := p.expandedWorkingDir()
 	if err != nil {
 		return err
@@ -119,6 +177,32 @@ func openProject(client *herdrClient, p Project) error {
 		return err
 	}
 
+	// Before creating anything, ask herdr whether this exact checkout is already
+	// open. A match is focused as it stands — no layout, no startup commands, no
+	// repair — and a failure to find out is an error, never a licence to make a
+	// duplicate. Off by default; see reuseOpenCheckout for the identity rules.
+	var checkout *gitCheckout
+	if reuse.enabled {
+		reused, err := reuseOpenCheckout(client, dir, reuse.choose)
+		if err != nil {
+			return err
+		}
+		if reused {
+			return nil
+		}
+
+		// No workspace carries provenance for this checkout — but herdr may still
+		// have it open in a workspace it holds none for (one from an older build of
+		// this plugin, say), and the question of whether this is even a Git checkout
+		// belongs to herdr rather than to a local Git command that might not answer.
+		// Everything uncertain is settled here, before anything is created. See the
+		// commentary in projectreuse.go.
+		checkout, err = resolveCheckoutForReuse(client, dir)
+		if err != nil {
+			return err
+		}
+	}
+
 	ws, rootTab, rootPane, err := client.workspaceCreate(dir, p.Name, true)
 	if err != nil {
 		return fmt.Errorf("create workspace: %w", err)
@@ -126,7 +210,22 @@ func openProject(client *herdrClient, p Project) error {
 
 	// Lay the project's tabs into the new workspace. dir anchors any per-tab or
 	// per-pane working_dir written relative to the project.
-	return layoutTabs(client, ws, rootTab, rootPane, dir, p.Tabs)
+	if err := layoutTabs(client, ws, rootTab, rootPane, dir, p.Tabs); err != nil {
+		return err
+	}
+
+	// The workspace and its layout are finished; now let herdr record which
+	// checkout it holds, so opening this project again returns to it instead of
+	// building a second one. Only for a Git checkout, and only with reuse on —
+	// nothing about the default behavior changes. A failure here leaves the
+	// finished workspace alone and says so: the work is usable, but this
+	// workspace will not be recognized on the next open.
+	if checkout != nil {
+		if err := bindCheckoutProvenance(client, ws, *checkout); err != nil {
+			return fmt.Errorf("%w\n  The workspace is open and laid out; only its checkout binding failed, so opening this project again will not return to it", err)
+		}
+	}
+	return nil
 }
 
 // openProjectAsWorktree creates a git worktree from the project's working
@@ -224,13 +323,48 @@ func checkTabDirs(root string, tabs []ProjectTab) error {
 	return err
 }
 
+// resolveSplitTargets resolves, for every pane of every tab, which pane it is
+// split off — the previous one by default, or the pane its split_from names.
+// targets[i][j] is the 0-based index within tab i of the pane that tab i's pane j
+// splits, and -1 for each tab's root pane, which splits nothing.
+//
+// It runs as one pass before any native call so an impossible target is refused
+// while backing out is free. Config loading validates the same rule (see
+// splitTargetIndex), so this is a second, closer guard rather than the only one:
+// layoutTabs is reachable from both projects and worktree layouts.
+func resolveSplitTargets(tabs []ProjectTab) ([][]int, error) {
+	targets := make([][]int, len(tabs))
+	for i, t := range tabs {
+		panes := t.effectivePanes()
+		targets[i] = make([]int, len(panes))
+		for j := range panes {
+			// Check the pane as it was written, not as effectivePanes normalized it:
+			// normalization clears the root pane's split fields, which would hide a
+			// root pane that declared a split_from it cannot have. Only SplitFrom is
+			// read here, so the raw and normalized panes are otherwise equivalent.
+			pane := panes[j]
+			if j < len(t.Panes) {
+				pane = t.Panes[j]
+			}
+			idx, err := splitTargetIndex(j, pane)
+			if err != nil {
+				return nil, fmt.Errorf("tab %q %w", t.Name, err)
+			}
+			targets[i][j] = idx
+		}
+	}
+	return targets, nil
+}
+
 // layoutTabs lays an ordered list of tabs — each with its panes and optional
 // startup commands — into an existing workspace whose root tab and root pane are
 // rootTab and rootPane, and whose own directory is root. tab[0] reuses the root
 // tab (renamed) and root pane; each later tab is created without focus so the
 // first stays in front while the rest spin up. Within a tab the first pane is the
-// tab's root and each later pane is split off the previous one. Every startup
-// command is run last, once all panes exist, paced to its freshly spawned shell.
+// tab's root and each later pane is split off the previous one — or off the
+// earlier pane its split_from names, which is how a full-height edge pane is
+// kept whole. Every startup command is run last, once all panes exist, paced to
+// its freshly spawned shell.
 //
 // root anchors the optional per-tab and per-pane working_dir: a relative one is
 // resolved against it, and a tab or pane that declares none simply inherits it.
@@ -247,6 +381,14 @@ func layoutTabs(client *herdrClient, ws, rootTab, rootPane, root string, tabs []
 	// found halfway through would otherwise leave a half-built workspace behind,
 	// which is worse than not starting. dirs[i][j] is tab i pane j's directory.
 	dirs, err := resolvePaneDirs(root, tabs)
+	if err != nil {
+		return err
+	}
+
+	// Same reasoning for split targets: resolve every one up front so a layout
+	// that cannot be built is refused before the first native call, not halfway
+	// through. targets[i][j] is the index of the pane tab i pane j splits off.
+	targets, err := resolveSplitTargets(tabs)
 	if err != nil {
 		return err
 	}
@@ -276,15 +418,26 @@ func layoutTabs(client *herdrClient, ws, rootTab, rootPane, root string, tabs []
 			}
 		}
 
-		prev := tabRoot
+		// panes[j] is the native id of this tab's pane j, so a later pane can be
+		// split off any earlier one rather than only the pane before it. It is
+		// per-tab: a pane index never reaches into another tab's panes.
+		panes := make([]string, len(t.effectivePanes()))
 		for j, pane := range t.effectivePanes() {
 			paneID := tabRoot
 			if j > 0 {
-				paneID, err = client.paneSplit(prev, pane.Split, pane.splitRatio(), dirs[i][j], false)
+				// tabRoot may not be the workspace's original root pane — a first tab
+				// with its own working_dir is rebuilt above — so targets are read from
+				// the ids this invocation actually created.
+				target := panes[targets[i][j]]
+				if target == "" {
+					return fmt.Errorf("tab %q pane %d: split target pane %d was not created", t.Name, j+1, targets[i][j]+1)
+				}
+				paneID, err = client.paneSplit(target, pane.Split, pane.splitRatio(), dirs[i][j], false)
 				if err != nil {
 					return fmt.Errorf("split pane %d in tab %q: %w", j+1, t.Name, err)
 				}
 			}
+			panes[j] = paneID
 			if lbl := strings.TrimSpace(pane.Label); lbl != "" {
 				if err := client.paneRename(paneID, lbl); err != nil {
 					// Labeling is cosmetic — warn but keep building the workspace.
@@ -294,7 +447,6 @@ func layoutTabs(client *herdrClient, ws, rootTab, rootPane, root string, tabs []
 			if strings.TrimSpace(pane.Command) != "" {
 				runs = append(runs, pendingRun{pane: paneID, command: pane.Command})
 			}
-			prev = paneID
 		}
 	}
 

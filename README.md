@@ -444,6 +444,47 @@ so this applies to projects whose `working_dir` is a git checkout root. A projec
 pointing at a plain (non-git) directory, or at a *subdirectory* of a checkout,
 has no such provenance and keeps the old behavior — a new workspace every time.
 
+## Shared worktree policy
+
+The optional `worktree` action and Projects' Ctrl+G share a planner with external
+callers such as an issue picker. Configure one policy per primary repository:
+
+```toml
+[worktree]
+branch_prefix = "your-name/"
+
+[[worktree.projects]]
+name = "project"
+repository = "~/code/project"
+root = "~/code/worktrees/project"
+max_tail = 29
+# base = "develop" # optional remote branch override
+```
+
+The picker shows the resulting branch and checkout path before applying it.
+Existing branches and registered paths are preserved. Issue matches use complete
+identifiers, so `IC-177` cannot select `IC-1770`; multiple matching branches remain
+explicit choices. New descriptions become lowercase kebab case within `max_tail`.
+New checkout directories replace branch slashes with `--` under the configured root.
+
+New branches use the remote's current default branch, or the configured override.
+Missing or unreadable remote defaults produce an error. Existing branches need
+neither a base query nor a fetch. The primary project must already be open with
+native checkout provenance; applying a selection never creates an implicit parent.
+
+For external callers, `plan-worktree --cwd /absolute/checkout --name "description"
+--issue IC-177` returns versioned JSON with `candidates` and a `fingerprint`.
+Planning reads Git and remote metadata without creating directories, fetching, or
+changing branches. Pass the same inputs plus `--candidate <id> --fingerprint <hash>`
+to `apply-worktree`. It rebuilds the plan, refuses stale or absent selections, and
+delegates native creation/opening to `ensure-worktree`. Its `result` preserves the
+native workspace, pane and checkout fields. Cancelling means never invoking apply.
+
+The W action requires Herdr's explicit invoking-pane context and opens a temporary
+overlay picker. It never chooses a project from another client's current focus.
+`ensure-worktree` also accepts an optional `--workspace` for an explicitly verified
+primary workspace; the older explicit-cwd interface remains available.
+
 ## Quick Actions
 
 A fuzzy launcher for one-off commands. Trigger it (action

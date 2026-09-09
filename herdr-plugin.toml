@@ -72,6 +72,19 @@ platforms = ["linux", "macos"]
 command = ["./bin/herdr-plus", "projects"]
 
 [[actions]]
+id = "worktree"
+title = "Herdr Plus: Worktree"
+platforms = ["linux", "macos"]
+command = ["./bin/herdr-plus", "worktree"]
+
+[[panes]]
+id = "worktree-picker"
+title = "Herdr Plus: Worktree"
+placement = "overlay"
+platforms = ["linux", "macos"]
+command = ["./bin/herdr-plus", "worktree-ui"]
+
+[[actions]]
 id = "projects-windows"
 title = "Herdr Plus: Projects"
 platforms = ["windows"]

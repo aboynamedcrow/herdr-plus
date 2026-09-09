@@ -53,6 +53,21 @@ func main() {
 		case "ensure-worktree":
 			runEnsureWorktree(os.Args[2:])
 			return
+		case "plan-worktree", "apply-worktree":
+			runWorktreePolicy(os.Args[1], os.Args[2:])
+			return
+		case "worktree":
+			launchPolicyWorktree()
+			return
+		case "worktree-ui":
+			ctx, err := decodeRunContext(os.Getenv("HERDR_PLUS_CTX"))
+			if err != nil {
+				errExit(err)
+			}
+			if err := runPolicyPicker(worktreeRequest{Cwd: ctx.WorkDir}); err != nil {
+				errExit(err)
+			}
+			return
 		case "ping":
 			runPing()
 			return

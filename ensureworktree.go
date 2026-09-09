@@ -33,7 +33,7 @@ func runEnsureWorktree(args []string) {
 func ensureWorktree(args []string) (json.RawMessage, error) {
 	flags := flag.NewFlagSet("ensure-worktree", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
-	var cwd, branch, base, path string
+	var cwd, branch, base, path, workspace string
 	var focus bool
 	// Reject duplicates rather than letting a later flag hide an invalid value.
 	seen := make(map[string]bool)
@@ -41,7 +41,7 @@ func ensureWorktree(args []string) (json.RawMessage, error) {
 		name  string
 		value *string
 	}{
-		{"cwd", &cwd}, {"branch", &branch}, {"base", &base}, {"path", &path},
+		{"cwd", &cwd}, {"branch", &branch}, {"base", &base}, {"path", &path}, {"workspace", &workspace},
 	} {
 		flags.Func(entry.name, "explicit "+entry.name, func(value string) error {
 			if seen[entry.name] {
@@ -64,6 +64,9 @@ func ensureWorktree(args []string) (json.RawMessage, error) {
 	}
 	if branch == "" {
 		return nil, errors.New("--branch is required")
+	}
+	if seen["workspace"] && !workspaceIDPattern.MatchString(workspace) {
+		return nil, errors.New("--workspace must be an explicit native workspace id")
 	}
 	if seen["path"] && (!filepath.IsAbs(path) || strings.ContainsRune(path, 0)) {
 		return nil, errors.New("--path must be an absolute path")
@@ -142,6 +145,17 @@ func ensureWorktree(args []string) (json.RawMessage, error) {
 		return nil, err
 	}
 	client.timeout = 30 * time.Second
+	if workspace != "" {
+		parent, err := client.workspaceGet(workspace)
+		if err != nil {
+			return nil, err
+		}
+		if parent.WorkspaceID != workspace || parent.Worktree == nil || parent.Worktree.IsLinkedWorktree || !samePath(parent.Worktree.CheckoutPath, canonical) {
+			return nil, errors.New("source workspace no longer holds the primary checkout")
+		}
+		delete(params, "cwd")
+		params["workspace_id"] = workspace
+	}
 	var result json.RawMessage
 	if err := client.call(method, params, &result); err != nil {
 		return nil, err

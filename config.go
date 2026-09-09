@@ -45,7 +45,8 @@ type PluginConfig struct {
 		// projects browser (ctrl+g). It is used verbatim, so include any trailing
 		// "/" yourself. Empty disables prefixing; a name that already contains "/"
 		// is left untouched (see resolveWorktreeBranch).
-		BranchPrefix string `toml:"branch_prefix"`
+		BranchPrefix string           `toml:"branch_prefix"`
+		Projects     []WorktreePolicy `toml:"projects"`
 	} `toml:"worktree"`
 
 	Projects struct {

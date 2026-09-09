@@ -135,6 +135,16 @@ func runProjectsUI() {
 		errExit(err)
 	}
 	if m.worktree {
+		if len(cfg.Worktree.Projects) > 0 {
+			dir, err := m.chosen.expandedWorkingDir()
+			if err != nil {
+				errExit(err)
+			}
+			if err := runPolicyPicker(worktreeRequest{Cwd: dir, Name: m.branch}); err != nil {
+				errExit(err)
+			}
+			return
+		}
 		if err := openProjectAsWorktree(client, *m.chosen, m.branch); err != nil {
 			errExit("could not open project as worktree:", err)
 		}

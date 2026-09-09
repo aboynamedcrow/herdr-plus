@@ -542,7 +542,9 @@ func (f *ensureFixture) git(args ...string) string {
 }
 
 func ensureResult(path string) map[string]any {
-	return map[string]any{"workspace": map[string]any{"workspace_id": "w1"}, "root_pane": map[string]any{"pane_id": "w1:p1"}, "worktree": map[string]any{"path": path, "branch": "feature/a"}, "native_extra": "preserved"}
+	// root_pane carries its own workspace_id, as PaneInfo does in the 0.9.0 API
+	// schema, so the fixture proves the workspace and pane are one result.
+	return map[string]any{"workspace": map[string]any{"workspace_id": "w1"}, "root_pane": map[string]any{"pane_id": "w1:p1", "workspace_id": "w1"}, "worktree": map[string]any{"path": path, "branch": "feature/a"}, "native_extra": "preserved"}
 }
 
 func (f *ensureFixture) run(args ...string) (string, string, error) {

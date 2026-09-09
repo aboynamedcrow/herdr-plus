@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 )
@@ -30,7 +31,120 @@ func runEnsureWorktree(args []string) {
 	}
 }
 
+// worktreeSelection is the plan snapshot a caller already showed the user and
+// the user accepted. ensure-worktree reads Git for itself, so without the
+// snapshot its fresh answer would quietly replace the accepted one; carrying it
+// through makes a changed selection a visible refusal instead.
+//
+// The legacy explicit-cwd command passes nil. It has no accepted plan to
+// preserve — its caller supplies the branch, path and base directly — and its
+// semantics are unchanged by these additional constraints.
+type worktreeSelection struct {
+	// Repository is the canonical primary checkout the plan was built against.
+	Repository string
+	// Branch and Path are the accepted candidate.
+	Branch, Path string
+	// Checkout is true when the candidate was a checkout Git had already
+	// registered for Branch, so Path must still be that registration.
+	Checkout bool
+	// Existing is true when Branch already existed locally at plan time.
+	Existing bool
+	// BaseOID is the commit the plan resolved the base ref to. It is empty for
+	// a candidate that needs no base.
+	BaseOID string
+}
+
+// errWorktreeSelectionChanged closes every selection refusal with the only safe
+// remedy. Applying the new state instead would create or open something the
+// user never chose.
+var errWorktreeSelectionChanged = errors.New("refresh and choose again; no worktree was created")
+
+// verifyGitState compares the fresh Git read against the accepted candidate.
+func (s *worktreeSelection) verifyGitState(root, branch, path, registered string) error {
+	if !samePath(root, s.Repository) {
+		return fmt.Errorf("the repository resolved to %s, not the planned %s; %w", root, s.Repository, errWorktreeSelectionChanged)
+	}
+	if branch != s.Branch {
+		return fmt.Errorf("the branch resolved to %q, not the selected %q; %w", branch, s.Branch, errWorktreeSelectionChanged)
+	}
+	if s.Checkout {
+		if registered == "" || !samePath(registered, s.Path) {
+			return fmt.Errorf("branch %s is no longer checked out at the selected %s (git now registers %q); %w", branch, s.Path, registered, errWorktreeSelectionChanged)
+		}
+		return nil
+	}
+	if registered != "" {
+		return fmt.Errorf("branch %s acquired a checkout at %s after the plan was made; %w", branch, registered, errWorktreeSelectionChanged)
+	}
+	if filepath.Clean(path) != filepath.Clean(s.Path) {
+		return fmt.Errorf("the destination resolved to %s, not the selected %s; %w", path, s.Path, errWorktreeSelectionChanged)
+	}
+	return nil
+}
+
+// verifyBranchPresence refuses when the local branch appeared or disappeared
+// after the plan: either way the selection now means something else.
+func (s *worktreeSelection) verifyBranchPresence(branch string, absent bool) error {
+	if absent != s.Existing {
+		return nil
+	}
+	state := "now exists locally"
+	if absent {
+		state = "no longer exists locally"
+	}
+	return fmt.Errorf("branch %s %s, contradicting the accepted plan; %w", branch, state, errWorktreeSelectionChanged)
+}
+
+// verifyBase refuses when the fetch resolved the base ref to a commit other
+// than the one the plan showed. origin/BASE is a mutable ref: the remote can
+// advance between planning and applying, and another local fetch can move it
+// again. Reading it back is what makes the accepted base commit, rather than
+// whatever the ref happens to name, the one this branch is created from.
+func (s *worktreeSelection) verifyBase(root, ref string) error {
+	if s.BaseOID == "" {
+		return fmt.Errorf("the accepted plan carries no verified base commit for %s; %w", s.Branch, errWorktreeSelectionChanged)
+	}
+	out, err := ensureGit(root, 10*time.Second, "rev-parse", "--verify", ref)
+	if err != nil {
+		return err
+	}
+	if got := strings.TrimSpace(string(out)); got != s.BaseOID {
+		return fmt.Errorf("base %s resolves to %s, not the accepted %s; %w", ref, got, s.BaseOID, errWorktreeSelectionChanged)
+	}
+	return nil
+}
+
+// verifyNativeParent refuses a native parent record that does not agree with the
+// Git repository just planned. Herdr 0.9's worktree_source_from_workspace routes
+// a workspace-addressed operation through that workspace's stored
+// membership.repo_root, so a record whose repo_root is missing or names another
+// repository would run the mutation somewhere other than the checkout this plan
+// was built from — even when its checkout_path matches.
+func verifyNativeParent(parent workspaceInfo, workspace, primary string) error {
+	if parent.WorkspaceID != workspace || parent.Worktree == nil || parent.Worktree.IsLinkedWorktree || !samePath(parent.Worktree.CheckoutPath, primary) {
+		return errors.New("source workspace no longer holds the primary checkout; no worktree was created")
+	}
+	if !samePath(parent.Worktree.RepoRoot, primary) {
+		return fmt.Errorf("source workspace %s reports repository root %q, not the primary checkout %s it is being used for; no worktree was created", workspace, parent.Worktree.RepoRoot, primary)
+	}
+	// repo_key and repo_name are what herdr groups and labels the repository by.
+	// They cannot be derived from Git here, but a record missing them is not a
+	// usable identity for the workspace the mutation would be attached to.
+	if strings.TrimSpace(parent.Worktree.RepoKey) == "" || strings.TrimSpace(parent.Worktree.RepoName) == "" {
+		return fmt.Errorf("source workspace %s reports incomplete repository provenance; no worktree was created", workspace)
+	}
+	return nil
+}
+
+// ensureWorktree is the legacy explicit-cwd entry point: every constraint comes
+// from its flags, with no accepted plan behind them.
 func ensureWorktree(args []string) (json.RawMessage, error) {
+	return ensureWorktreeSelected(args, nil)
+}
+
+// ensureWorktreeSelected is the sole ensure implementation. want is the plan
+// snapshot to preserve, or nil for the legacy API.
+func ensureWorktreeSelected(args []string, want *worktreeSelection) (json.RawMessage, error) {
 	flags := flag.NewFlagSet("ensure-worktree", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
 	var cwd, branch, base, path, workspace string
@@ -106,7 +220,16 @@ func ensureWorktree(args []string) (json.RawMessage, error) {
 	if err != nil {
 		return nil, err
 	}
+	if want != nil {
+		if err := want.verifyGitState(canonical, branch, path, registered); err != nil {
+			return nil, err
+		}
+	}
 	params := map[string]any{"cwd": canonical, "branch": branch, "focus": focus}
+	// The ref the accepted base commit was verified against, re-read just before
+	// the mutation is submitted so the native call cannot inherit a base another
+	// local fetch moved while this command was talking to herdr.
+	var verifiedBase string
 	method, expectedPath := "worktree.open", registered
 	if registered == "" {
 		method = "worktree.create"
@@ -115,6 +238,11 @@ func ensureWorktree(args []string) (json.RawMessage, error) {
 		absent := errors.As(err, &exitErr) && exitErr.ExitCode() == 1
 		if err != nil && !absent {
 			return nil, err
+		}
+		if want != nil {
+			if err := want.verifyBranchPresence(branch, absent); err != nil {
+				return nil, err
+			}
 		}
 		if absent && (base == "" || path == "") {
 			return nil, errors.New("a new branch requires explicit --base and --path")
@@ -137,6 +265,12 @@ func ensureWorktree(args []string) (json.RawMessage, error) {
 			if _, err := ensureGit(canonical, 2*time.Minute, "fetch", "origin", "refs/heads/"+base+":refs/remotes/origin/"+base); err != nil {
 				return nil, err
 			}
+			if want != nil {
+				verifiedBase = "refs/remotes/origin/" + base
+				if err := want.verifyBase(canonical, verifiedBase); err != nil {
+					return nil, err
+				}
+			}
 			params["base"] = "origin/" + base
 		}
 	}
@@ -150,11 +284,16 @@ func ensureWorktree(args []string) (json.RawMessage, error) {
 		if err != nil {
 			return nil, err
 		}
-		if parent.WorkspaceID != workspace || parent.Worktree == nil || parent.Worktree.IsLinkedWorktree || !samePath(parent.Worktree.CheckoutPath, canonical) {
-			return nil, errors.New("source workspace no longer holds the primary checkout")
+		if err := verifyNativeParent(parent, workspace, canonical); err != nil {
+			return nil, err
 		}
 		delete(params, "cwd")
 		params["workspace_id"] = workspace
+	}
+	if verifiedBase != "" {
+		if err := want.verifyBase(canonical, verifiedBase); err != nil {
+			return nil, err
+		}
 	}
 	var result json.RawMessage
 	if err := client.call(method, params, &result); err != nil {
@@ -316,13 +455,21 @@ func ensureRegisteredPath(cwd string, data []byte, branch string) (string, error
 	return selected, nil
 }
 
+// panePartPattern is the suffix Herdr appends to the owning workspace id to
+// spell a pane id: ":p" plus the pane's public number
+// (public_pane_id_for_number in the pinned 0.9.0 source). Checking it, and the
+// workspace id it is built on, is what makes "this pane belongs to this
+// workspace" a fact rather than an assumption the adapter would inherit.
+var panePartPattern = regexp.MustCompile(`^p[0-9A-Za-z]+$`)
+
 func validateEnsureResult(raw json.RawMessage, branch, expectedPath string) error {
 	var result struct {
 		Workspace struct {
 			ID string `json:"workspace_id"`
 		} `json:"workspace"`
 		RootPane struct {
-			ID string `json:"pane_id"`
+			ID          string `json:"pane_id"`
+			WorkspaceID string `json:"workspace_id"`
 		} `json:"root_pane"`
 		Worktree struct {
 			Path   string `json:"path"`
@@ -333,8 +480,17 @@ func validateEnsureResult(raw json.RawMessage, branch, expectedPath string) erro
 	if err := json.Unmarshal(raw, &result); err != nil {
 		return fmt.Errorf("malformed native worktree result: %w", err)
 	}
-	if strings.TrimSpace(result.Workspace.ID) == "" || strings.TrimSpace(result.RootPane.ID) == "" || !filepath.IsAbs(result.Worktree.Path) || strings.ContainsRune(result.Worktree.Path, 0) || result.Worktree.Branch != branch {
+	workspaceID := strings.TrimSpace(result.Workspace.ID)
+	paneID := strings.TrimSpace(result.RootPane.ID)
+	if !workspaceIDPattern.MatchString(workspaceID) || !workspaceIDPattern.MatchString(paneID) || !filepath.IsAbs(result.Worktree.Path) || strings.ContainsRune(result.Worktree.Path, 0) || result.Worktree.Branch != branch {
 		return errors.New("native worktree result lacks valid workspace/pane IDs or matching worktree path/branch")
+	}
+	// A workspace and a root pane that name different workspaces are not one
+	// result. Passing the pair on intact would hand the caller two native
+	// objects it has no basis for treating as related.
+	suffix, ok := strings.CutPrefix(paneID, workspaceID+":")
+	if !ok || !panePartPattern.MatchString(suffix) || strings.TrimSpace(result.RootPane.WorkspaceID) != workspaceID {
+		return fmt.Errorf("native worktree result reports root pane %q for workspace %q; they are not one workspace", result.RootPane.ID, result.Workspace.ID)
 	}
 	if expectedPath != "" && filepath.Clean(result.Worktree.Path) != filepath.Clean(expectedPath) {
 		// Native may canonicalize a supplied path through a symlinked parent.

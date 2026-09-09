@@ -149,6 +149,42 @@ func matchesIssue(branch, issue string) bool {
 	return regexp.MustCompile(pattern).MatchString(branch)
 }
 
+// canonicalDestination gives an absolute path that does not exist yet the same
+// single spelling canonicalPath gives an existing one. It resolves the deepest
+// ancestor that does exist and reattaches the components that do not, so a root
+// reached through a symlink is identified by the directory it physically lands
+// in. It creates nothing: planning stays read-only, and a destination whose
+// ancestor is a file — or unreadable — is an error rather than a guess.
+func canonicalDestination(path string) (string, error) {
+	if !filepath.IsAbs(path) || strings.ContainsRune(path, 0) {
+		return "", fmt.Errorf("%q is not an absolute path", path)
+	}
+	current := filepath.Clean(path)
+	var missing []string
+	for {
+		resolved, err := filepath.EvalSymlinks(current)
+		if err == nil {
+			info, err := os.Stat(resolved)
+			if err != nil {
+				return "", err
+			}
+			if !info.IsDir() {
+				return "", fmt.Errorf("%s is not a directory", current)
+			}
+			return filepath.Join(append([]string{resolved}, missing...)...), nil
+		}
+		if !os.IsNotExist(err) {
+			return "", err
+		}
+		parent := filepath.Dir(current)
+		if parent == current {
+			return "", fmt.Errorf("%q has no existing ancestor directory", path)
+		}
+		missing = append([]string{filepath.Base(current)}, missing...)
+		current = parent
+	}
+}
+
 func policyForCheckout(cfg PluginConfig, primary string) (WorktreePolicy, error) {
 	var matches []WorktreePolicy
 	for _, policy := range cfg.Worktree.Projects {
@@ -173,6 +209,14 @@ func policyForCheckout(cfg PluginConfig, primary string) (WorktreePolicy, error)
 		policy.Root, err = expandPath(policy.Root)
 		if err != nil || !filepath.IsAbs(policy.Root) {
 			return WorktreePolicy{}, errors.New("project root must expand to an absolute path")
+		}
+		// The root is a destination, not an existing directory, so it cannot be
+		// canonicalized outright. Resolving the ancestors it does have gives the
+		// plan a physical identity: a retargeted symlink above the root then
+		// changes the fingerprint instead of silently redirecting the checkout.
+		policy.Root, err = canonicalDestination(policy.Root)
+		if err != nil {
+			return WorktreePolicy{}, fmt.Errorf("resolve configured root %s: %w", policy.Name, err)
 		}
 		matches = append(matches, policy)
 	}
@@ -392,5 +436,17 @@ func applyWorktreePlan(req worktreeRequest, plan worktreePlan) (json.RawMessage,
 	if !selected.Existing {
 		args = append(args, "--base", plan.Base)
 	}
-	return ensureWorktree(args)
+	// The flags above name the selection; the snapshot below is what the user
+	// actually accepted. ensure-worktree reads Git again, and without the
+	// snapshot its fresh answer would silently become the decision — a moved
+	// checkout opened instead of the chosen one, or a base that advanced between
+	// the plan and the fetch.
+	return ensureWorktreeSelected(args, &worktreeSelection{
+		Repository: plan.Repository,
+		Branch:     selected.Branch,
+		Path:       selected.Path,
+		Checkout:   selected.Checkout,
+		Existing:   selected.Existing,
+		BaseOID:    plan.BaseOID,
+	})
 }

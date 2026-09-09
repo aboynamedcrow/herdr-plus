@@ -11,7 +11,7 @@ herdr-plus is an add-on for [herdr](https://herdr.dev), built as a first-class
 
 ## Install
 
-herdr-plus is a herdr plugin (requires **herdr ≥ 0.7.0**). Installing it registers
+herdr-plus is a herdr plugin (requires **herdr ≥ 0.9.0**). Installing it registers
 the plugin's actions with herdr — no editing of your `config.toml`.
 
 ```bash
@@ -106,8 +106,12 @@ tab instead of opening the browser — see
 [Returning to work you already have open](#returning-to-work-you-already-have-open).)
 Inside the browser, **Enter** opens the highlighted project as a normal workspace;
 **ctrl+g** opens it as a git worktree. The worktree prompt accepts an optional
-branch name: empty lets herdr generate `worktree/...`, bare names get the optional
-`[worktree] branch_prefix`, and names containing `/` are used as-is.
+branch name. Without a [shared worktree policy](#shared-worktree-policy)
+configured, empty lets herdr generate `worktree/...`, bare names get the optional
+`[worktree] branch_prefix`, and names containing `/` are used as-is. With a
+policy configured for the project's repository, the name goes to the shared
+planner exactly as typed — it applies `branch_prefix` itself, and shows the
+branch and checkout path for confirmation before anything is created.
 
 Opening as a worktree fills its tabs from a matching
 [worktree auto-layout](#worktree-auto-layout) — a file in `worktrees/` whose `repo`

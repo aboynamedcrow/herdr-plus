@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net"
 	"os"
 	"os/exec"
@@ -21,9 +22,14 @@ func TestActionFailureIsVisibleAndNotificationIsBounded(t *testing.T) {
 	if out, err := exec.Command("go", "build", "-o", bin, ".").CombinedOutput(); err != nil {
 		t.Fatalf("build: %v\n%s", err, out)
 	}
+	// The first two replies are what a delivered notification actually looks
+	// like: the request's own id echoed back — the client rejects any other as a
+	// mismatched reply — and the notification_show result herdr sends. The rest
+	// cover a refusal and a reply that never arrives.
+	const shown = `{"id":%q,"result":{"type":"notification_show","shown":true,"reason":"shown"}}`
 	for _, tc := range []struct{ action, reply string }{
-		{"projects", `{"result":{}}`},
-		{"worktree", `{"result":{}}`},
+		{"projects", shown},
+		{"worktree", shown},
 		{"worktree", `{"error":{"code":"unavailable","message":"notifications unavailable"}}`},
 		{"worktree", ""},
 	} {
@@ -43,6 +49,7 @@ func TestActionFailureIsVisibleAndNotificationIsBounded(t *testing.T) {
 			}
 			defer listener.Close()
 			type request struct {
+				ID     string
 				Method string
 				Params map[string]any
 			}
@@ -61,7 +68,9 @@ func TestActionFailureIsVisibleAndNotificationIsBounded(t *testing.T) {
 					return
 				}
 				seen <- req
-				if tc.reply != "" {
+				if tc.reply == shown {
+					_, _ = fmt.Fprintf(conn, tc.reply+"\n", req.ID)
+				} else if tc.reply != "" {
 					_, _ = conn.Write([]byte(tc.reply + "\n"))
 				} else {
 					// Wait for the client's deadline to close this connection.

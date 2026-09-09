@@ -208,7 +208,32 @@ func (f *fakeHerdr) refuseWorktreeList() {
 
 // wsInfo builds one workspace.list / workspace.get entry with checkout
 // provenance, the way herdr reports a workspace opened on a git checkout.
+//
+// repo_root follows the real 0.9.0 shape rather than a placeholder: herdr builds
+// a membership from the source's repo root, so a workspace on a primary checkout
+// reports repo_root == checkout_path, and only a linked one reports a different
+// root. A fixture that always said "/repo" modelled provenance no real herdr
+// sends, and made a contradictory record look like the normal case.
 func wsInfo(id, label, checkout string, linked bool) map[string]any {
+	repoRoot := checkout
+	if linked {
+		repoRoot = "/repo"
+	}
+	return wsInfoWithRoot(id, label, checkout, repoRoot, linked)
+}
+
+// wsInfoWithRoot is wsInfo with the repository root stated explicitly, for the
+// cases that need a record herdr would not send.
+func wsInfoWithRoot(id, label, checkout, repoRoot string, linked bool) map[string]any {
+	worktree := map[string]any{
+		"repo_key":           "repo-key",
+		"repo_name":          "repo",
+		"checkout_path":      checkout,
+		"is_linked_worktree": linked,
+	}
+	if repoRoot != "" {
+		worktree["repo_root"] = repoRoot
+	}
 	return map[string]any{
 		"workspace_id": id,
 		"number":       1,
@@ -216,13 +241,7 @@ func wsInfo(id, label, checkout string, linked bool) map[string]any {
 		"focused":      false,
 		"pane_count":   1,
 		"tab_count":    1,
-		"worktree": map[string]any{
-			"repo_key":           "repo-key",
-			"repo_name":          "repo",
-			"repo_root":          "/repo",
-			"checkout_path":      checkout,
-			"is_linked_worktree": linked,
-		},
+		"worktree":     worktree,
 	}
 }
 

@@ -140,7 +140,10 @@ func runProjectsUI() {
 			if err != nil {
 				errExit(err)
 			}
-			if err := runPolicyPicker(worktreeRequest{Cwd: dir, Name: m.branch}); err != nil {
+			// The planner takes the raw input. It applies branch_prefix itself, and
+			// only the unprefixed name still matches an existing unprefixed branch —
+			// the case W already reuses without a base query or a fetch.
+			if err := runPolicyPicker(worktreeRequest{Cwd: dir, Name: m.rawBranch}); err != nil {
 				errExit(err)
 			}
 			return

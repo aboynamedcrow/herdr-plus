@@ -54,6 +54,18 @@ type worktreeSelection struct {
 	BaseOID string
 }
 
+// isObjectID reports whether value is a full Git object id — SHA-1 or SHA-256.
+// A base that reaches native becomes the start-point argument of
+// `git worktree add`, so it must be an object id and nothing that Git could
+// interpret as an option or a revision expression.
+func isObjectID(value string) bool {
+	if len(value) != 40 && len(value) != 64 {
+		return false
+	}
+	_, err := hex.DecodeString(value)
+	return err == nil
+}
+
 // errWorktreeSelectionChanged closes every selection refusal with the only safe
 // remedy. Applying the new state instead would create or open something the
 // user never chose.
@@ -95,43 +107,61 @@ func (s *worktreeSelection) verifyBranchPresence(branch string, absent bool) err
 	return fmt.Errorf("branch %s %s, contradicting the accepted plan; %w", branch, state, errWorktreeSelectionChanged)
 }
 
-// verifyBase refuses when the fetch resolved the base ref to a commit other
-// than the one the plan showed. origin/BASE is a mutable ref: the remote can
-// advance between planning and applying, and another local fetch can move it
-// again. Reading it back is what makes the accepted base commit, rather than
-// whatever the ref happens to name, the one this branch is created from.
-func (s *worktreeSelection) verifyBase(root, ref string) error {
-	if s.BaseOID == "" {
-		return fmt.Errorf("the accepted plan carries no verified base commit for %s; %w", s.Branch, errWorktreeSelectionChanged)
+// verifyBase confirms the fetch brought back exactly the commit the plan showed,
+// and returns that commit for native creation.
+//
+// origin/BASE is a mutable ref: the remote can advance between planning and
+// applying, and another local fetch can move it again. So the ref is checked
+// once, here, against the accepted commit — and it is the commit, never the
+// ref, that is handed to native afterwards. Herdr 0.9 passes base through
+// `run_worktree_add_command` into the start-point argument of
+// `git worktree add -b <branch> <path> <base>` with no branch-only validation
+// (pinned `src/app/api/worktrees/deferred.rs` and `src/worktree.rs`), so an
+// object id is accepted there and nothing can move underneath it.
+func (s *worktreeSelection) verifyBase(root, ref string) (string, error) {
+	if !isObjectID(s.BaseOID) {
+		return "", fmt.Errorf("the accepted plan carries no verified base commit for %s; %w", s.Branch, errWorktreeSelectionChanged)
 	}
 	out, err := ensureGit(root, 10*time.Second, "rev-parse", "--verify", ref)
 	if err != nil {
-		return err
+		return "", err
 	}
 	if got := strings.TrimSpace(string(out)); got != s.BaseOID {
-		return fmt.Errorf("base %s resolves to %s, not the accepted %s; %w", ref, got, s.BaseOID, errWorktreeSelectionChanged)
+		return "", fmt.Errorf("base %s resolves to %s, not the accepted %s; %w", ref, got, s.BaseOID, errWorktreeSelectionChanged)
 	}
-	return nil
+	return s.BaseOID, nil
 }
 
 // verifyNativeParent refuses a native parent record that does not agree with the
-// Git repository just planned. Herdr 0.9's worktree_source_from_workspace routes
-// a workspace-addressed operation through that workspace's stored
-// membership.repo_root, so a record whose repo_root is missing or names another
-// repository would run the mutation somewhere other than the checkout this plan
-// was built from — even when its checkout_path matches.
-func verifyNativeParent(parent workspaceInfo, workspace, primary string) error {
+// Git repository just planned.
+//
+// Herdr 0.9 routes a workspace-addressed operation through that workspace's
+// stored membership.repo_root (`worktree_source_from_workspace`), so a record
+// whose repo_root is missing or names another repository would run the mutation
+// somewhere other than the checkout this plan was built from — even when its
+// checkout_path matches. repo_key is the identity herdr groups and finds parent
+// workspaces by (`find_parent_workspace_by_key`), and pinned
+// `src/workspace/git_discovery.rs` derives it as the canonical Git common
+// directory, so Git can be asked for it directly rather than trusted.
+//
+// commonDir is this repository's canonical Git common directory.
+func verifyNativeParent(parent workspaceInfo, workspace, primary, commonDir string) error {
 	if parent.WorkspaceID != workspace || parent.Worktree == nil || parent.Worktree.IsLinkedWorktree || !samePath(parent.Worktree.CheckoutPath, primary) {
 		return errors.New("source workspace no longer holds the primary checkout; no worktree was created")
 	}
 	if !samePath(parent.Worktree.RepoRoot, primary) {
 		return fmt.Errorf("source workspace %s reports repository root %q, not the primary checkout %s it is being used for; no worktree was created", workspace, parent.Worktree.RepoRoot, primary)
 	}
-	// repo_key and repo_name are what herdr groups and labels the repository by.
-	// They cannot be derived from Git here, but a record missing them is not a
-	// usable identity for the workspace the mutation would be attached to.
-	if strings.TrimSpace(parent.Worktree.RepoKey) == "" || strings.TrimSpace(parent.Worktree.RepoName) == "" {
-		return fmt.Errorf("source workspace %s reports incomplete repository provenance; no worktree was created", workspace)
+	// samePath refuses an empty value, so a record with no key is refused here
+	// rather than needing a separate presence check.
+	if !samePath(parent.Worktree.RepoKey, commonDir) {
+		return fmt.Errorf("source workspace %s reports repository key %q, not this repository's Git directory %s; no worktree was created", workspace, parent.Worktree.RepoKey, commonDir)
+	}
+	// repo_name is herdr's display label for the repository, derived from the
+	// common directory's own name; it selects nothing, so it is required to be
+	// present and not re-derived here.
+	if strings.TrimSpace(parent.Worktree.RepoName) == "" {
+		return fmt.Errorf("source workspace %s reports no repository name; no worktree was created", workspace)
 	}
 	return nil
 }
@@ -226,10 +256,6 @@ func ensureWorktreeSelected(args []string, want *worktreeSelection) (json.RawMes
 		}
 	}
 	params := map[string]any{"cwd": canonical, "branch": branch, "focus": focus}
-	// The ref the accepted base commit was verified against, re-read just before
-	// the mutation is submitted so the native call cannot inherit a base another
-	// local fetch moved while this command was talking to herdr.
-	var verifiedBase string
 	method, expectedPath := "worktree.open", registered
 	if registered == "" {
 		method = "worktree.create"
@@ -265,13 +291,16 @@ func ensureWorktreeSelected(args []string, want *worktreeSelection) (json.RawMes
 			if _, err := ensureGit(canonical, 2*time.Minute, "fetch", "origin", "refs/heads/"+base+":refs/remotes/origin/"+base); err != nil {
 				return nil, err
 			}
+			// Legacy callers name a branch and get the remote-tracking ref they
+			// asked for. An accepted plan gets the commit it showed the user.
+			params["base"] = "origin/" + base
 			if want != nil {
-				verifiedBase = "refs/remotes/origin/" + base
-				if err := want.verifyBase(canonical, verifiedBase); err != nil {
+				verified, err := want.verifyBase(canonical, "refs/remotes/origin/"+base)
+				if err != nil {
 					return nil, err
 				}
+				params["base"] = verified
 			}
-			params["base"] = "origin/" + base
 		}
 	}
 	client, err := newHerdrClient()
@@ -284,16 +313,17 @@ func ensureWorktreeSelected(args []string, want *worktreeSelection) (json.RawMes
 		if err != nil {
 			return nil, err
 		}
-		if err := verifyNativeParent(parent, workspace, canonical); err != nil {
+		// Ask Git for the same value herdr derives repo_key from, rather than
+		// accepting the key the record carries.
+		commonDir, err := ensureGit(canonical, 10*time.Second, "rev-parse", "--path-format=absolute", "--git-common-dir")
+		if err != nil {
+			return nil, err
+		}
+		if err := verifyNativeParent(parent, workspace, canonical, strings.TrimSpace(string(commonDir))); err != nil {
 			return nil, err
 		}
 		delete(params, "cwd")
 		params["workspace_id"] = workspace
-	}
-	if verifiedBase != "" {
-		if err := want.verifyBase(canonical, verifiedBase); err != nil {
-			return nil, err
-		}
 	}
 	var result json.RawMessage
 	if err := client.call(method, params, &result); err != nil {

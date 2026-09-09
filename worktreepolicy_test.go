@@ -384,12 +384,19 @@ func TestPolicyProjectsAndWorktreeAgreeOnUnprefixedBranch(t *testing.T) {
 }
 
 // Herdr routes a workspace-addressed worktree action through that workspace's
-// stored repo_root. A record that names another repository, or none, is not
-// evidence that the delegated mutation lands in the repository just planned.
+// stored repo_root, and groups repositories by repo_key — the canonical Git
+// common directory. A record that names another repository, or omits either
+// identity, is not evidence that the delegated mutation lands in the repository
+// just planned.
 func TestPolicyApplyRefusesUnusableParentProvenance(t *testing.T) {
-	for _, tc := range []struct{ name, repoRoot, diagnostic string }{
-		{"contradictory repo root", "/repo", "repository root"},
-		{"missing repo root", "", "repository root"},
+	// key is resolved per-case against the fixture repository; "" omits the
+	// field and "KEEP" means the real canonical Git common directory.
+	for _, tc := range []struct{ name, repoRoot, key, diagnostic string }{
+		{"contradictory repo root", "/repo", "KEEP", "repository root"},
+		{"missing repo root", "", "KEEP", "repository root"},
+		{"contradictory repo key", "KEEP", "/elsewhere/.git", "repository key"},
+		{"missing repo key", "KEEP", "", "repository key"},
+		{"repo key names the checkout, not its git dir", "KEEP", "KEEP-ROOT", "repository key"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			repo, _ := policyFixture(t)
@@ -400,13 +407,23 @@ func TestPolicyApplyRefusesUnusableParentProvenance(t *testing.T) {
 				t.Fatal(err)
 			}
 			req.Fingerprint, req.Candidate = plan.Fingerprint, plan.Candidates[0].ID
+			root, key := tc.repoRoot, tc.key
+			if root == "KEEP" {
+				root = repo
+			}
+			switch key {
+			case "KEEP":
+				key = filepath.Join(repo, ".git")
+			case "KEEP-ROOT":
+				key = repo
+			}
 			f := startFakeHerdr(t)
 			f.handle("worktree.list", map[string]any{"worktrees": []any{listedCheckout(repo, "wparent")}})
-			f.handle("workspace.get", map[string]any{"workspace": wsInfoWithRoot("wparent", "Primary", repo, tc.repoRoot, false)})
+			f.handle("workspace.get", map[string]any{"workspace": wsInfoWithProvenance("wparent", "Primary", repo, root, key, false)})
 			f.handle("worktree.open", selectionResult(plan.Candidates[0].Branch, repo))
 			f.handle("worktree.create", selectionResult(plan.Candidates[0].Branch, plan.Candidates[0].Path))
 			if out, err := applyWorktreePlan(req, plan); err == nil {
-				t.Fatalf("accepted repo_root %q against primary %s: %s", tc.repoRoot, repo, out)
+				t.Fatalf("accepted repo_root %q / repo_key %q against primary %s: %s", root, key, repo, out)
 			} else if !strings.Contains(err.Error(), tc.diagnostic) {
 				t.Fatalf("refusal does not explain the provenance gap: %v", err)
 			}
@@ -457,5 +474,53 @@ func TestPolicyRefusesUnusableNativeResultIdentities(t *testing.T) {
 	}
 	if err := validateEnsureResult(valid, "ingwon/task", "/tmp/checkout"); err != nil {
 		t.Fatalf("refused a consistent native result: %v", err)
+	}
+}
+
+// A new branch is created from the exact commit the plan showed, handed to
+// native as an object id.
+//
+// Verifying the fetched ref proves what origin held at fetch time; it cannot
+// bind what origin/BASE names later. Herdr passes base straight into the
+// start-point of `git worktree add -b <branch> <path> <base>`, so sending the
+// commit rather than the ref is what makes the accepted base unmovable — here
+// the ref is deliberately moved after verification and before the native call.
+func TestPolicyApplyCreatesFromTheImmutableAcceptedBase(t *testing.T) {
+	repo, origin := policyFixture(t)
+	req := worktreeRequest{Cwd: repo, Name: "new task"}
+	plan, err := planWorktree(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Fingerprint, req.Candidate = plan.Fingerprint, plan.Candidates[0].ID
+	if !isObjectID(plan.BaseOID) || plan.Candidates[0].Existing {
+		t.Fatalf("fixture must plan a new branch from a resolved base: %+v", plan)
+	}
+
+	f := startFakeHerdr(t)
+	f.handle("worktree.list", map[string]any{"worktrees": []any{listedCheckout(repo, "wparent")}})
+	// workspace.get runs after the base has been fetched and verified, and
+	// before the create is submitted: exactly the window a ref-named base would
+	// still be exposed in.
+	f.handleFunc("workspace.get", func(request) (any, *herdrError) {
+		runGit(t, origin, "commit", "--allow-empty", "-m", "advance after verification")
+		runGit(t, repo, "fetch", "origin", "refs/heads/trunk:refs/remotes/origin/trunk")
+		return map[string]any{"workspace": wsInfo("wparent", "Primary", repo, false)}, nil
+	})
+	f.handle("worktree.create", selectionResult(plan.Candidates[0].Branch, plan.Candidates[0].Path))
+
+	if _, err := applyWorktreePlan(req, plan); err != nil {
+		t.Fatal(err)
+	}
+	moved := runGit(t, repo, "rev-parse", "refs/remotes/origin/trunk")
+	if moved == plan.BaseOID {
+		t.Fatal("fixture must move origin/trunk after verification")
+	}
+	params := f.paramsFor("worktree.create")
+	if params["base"] != plan.BaseOID {
+		t.Fatalf("native base was %q, want the accepted commit %s (origin/trunk is now %s)", params["base"], plan.BaseOID, moved)
+	}
+	if params["branch"] != plan.Candidates[0].Branch || params["path"] != plan.Candidates[0].Path || params["workspace_id"] != "wparent" {
+		t.Fatalf("wrong native create target: %v", params)
 	}
 }

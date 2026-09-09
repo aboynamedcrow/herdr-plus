@@ -181,6 +181,7 @@ func openProject(client *herdrClient, p Project, reuse reuseOptions) error {
 	// open. A match is focused as it stands — no layout, no startup commands, no
 	// repair — and a failure to find out is an error, never a licence to make a
 	// duplicate. Off by default; see reuseOpenCheckout for the identity rules.
+	var checkout *gitCheckout
 	if reuse.enabled {
 		reused, err := reuseOpenCheckout(client, dir, reuse.choose)
 		if err != nil {
@@ -188,6 +189,24 @@ func openProject(client *herdrClient, p Project, reuse reuseOptions) error {
 		}
 		if reused {
 			return nil
+		}
+
+		// No workspace carries provenance for this checkout — but herdr may still
+		// have it open in a workspace it holds no provenance for (one from an older
+		// build of this plugin, say). Read Git's registry, then herdr's, and refuse
+		// rather than duplicate it. See the commentary in projectreuse.go.
+		checkout, err = resolveGitCheckout(dir)
+		if err != nil {
+			return err
+		}
+		if checkout != nil {
+			open, err := legacyOpenCheckout(client, *checkout)
+			if err != nil {
+				return err
+			}
+			if open != "" {
+				return fmt.Errorf("workspace %s already has %s checked out, but herdr holds no checkout provenance for it — so it cannot be identified as this project. Nothing was created or changed. Close that workspace and open the project again, or open the checkout through herdr's own worktree open so it carries provenance", open, checkout.Path)
+			}
 		}
 	}
 
@@ -198,7 +217,22 @@ func openProject(client *herdrClient, p Project, reuse reuseOptions) error {
 
 	// Lay the project's tabs into the new workspace. dir anchors any per-tab or
 	// per-pane working_dir written relative to the project.
-	return layoutTabs(client, ws, rootTab, rootPane, dir, p.Tabs)
+	if err := layoutTabs(client, ws, rootTab, rootPane, dir, p.Tabs); err != nil {
+		return err
+	}
+
+	// The workspace and its layout are finished; now let herdr record which
+	// checkout it holds, so opening this project again returns to it instead of
+	// building a second one. Only for a Git checkout, and only with reuse on —
+	// nothing about the default behavior changes. A failure here leaves the
+	// finished workspace alone and says so: the work is usable, but this
+	// workspace will not be recognized on the next open.
+	if checkout != nil {
+		if err := bindCheckoutProvenance(client, ws, *checkout); err != nil {
+			return fmt.Errorf("%w\n  The workspace is open and laid out; only its checkout binding failed, so opening this project again will not return to it", err)
+		}
+	}
+	return nil
 }
 
 // openProjectAsWorktree creates a git worktree from the project's working

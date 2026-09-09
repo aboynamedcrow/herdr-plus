@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -267,6 +268,155 @@ func samePath(a, b string) bool {
 	ca, errA := canonicalPath(a)
 	cb, errB := canonicalPath(b)
 	return errA == nil && errB == nil && ca == cb
+}
+
+// Native checkout provenance and the workspaces herdr-plus creates itself
+// ---------------------------------------------------------------------------
+//
+// herdr records checkout provenance (workspace.worktree) for a workspace it
+// opened as a worktree, but NOT for one made with workspace.create — which is
+// how openProject builds a project's workspace. Verified against Herdr 0.9.0:
+// `handle_worktree_open` is what calls `mark_worktree_membership`; nothing on
+// the workspace.create path does. So a project workspace this plugin created is
+// invisible to the provenance matching above, and the second P would build a
+// duplicate of work that is already on screen.
+//
+// The two functions below close that gap without loosening the identity rule —
+// no shell-directory matching, no title matching, no local registry:
+//
+//   - bindCheckoutProvenance asks herdr to open the checkout it just created a
+//     workspace for. herdr finds that workspace already open on that checkout
+//     (`already_open`), attaches provenance to it, and leaves its panes alone —
+//     it does not create or lay out anything. From then on the workspace is
+//     matchable by the same strict provenance rule as any other.
+//   - legacyOpenCheckout covers workspaces that never got that far: ones from an
+//     older build, or created some other way. herdr's own worktree.list reports
+//     which registered checkout is open in which workspace, so a checkout that
+//     is open but unprovenanced is detected — and refused visibly instead of
+//     duplicated. Adopting it would mean trusting an identity herdr-plus cannot
+//     verify, which is the decision deferred to the user.
+
+// gitCheckout is a project directory that Git has registered as a checkout, and
+// the primary checkout of its repository — the only source herdr accepts for a
+// worktree action.
+type gitCheckout struct {
+	// Path is the canonical registered checkout path, as Git spells it.
+	Path string
+	// Primary is the canonical path of the repository's main worktree.
+	Primary string
+}
+
+// resolveGitCheckout reports how a project's directory sits in Git, reading
+// Git's own registry (`git worktree list --porcelain`, through the same strict
+// parser ensure-worktree uses). It returns nil with no error when provenance
+// simply does not apply — the directory is not in a Git work tree, is a
+// subdirectory of a checkout rather than a checkout root, or Git cannot be run
+// at all — because those projects keep working exactly as they always have.
+//
+// It returns an error only when Git answers with something that cannot be
+// trusted: a malformed listing, or a repository whose main worktree is bare and
+// therefore has no checkout to act from. Guessing a primary path from a
+// directory name is exactly the kind of improvisation this must not do.
+func resolveGitCheckout(dir string) (*gitCheckout, error) {
+	canonical, err := canonicalPath(dir)
+	if err != nil {
+		return nil, fmt.Errorf("resolve the project directory %s: %w", dir, err)
+	}
+	listing, err := ensureGit(canonical, 10*time.Second, "worktree", "list", "--porcelain", "-z")
+	if err != nil {
+		// Git ran and refused (not a repository), or could not run at all. Either
+		// way there is no Git identity to establish here; the project opens as it
+		// always did. A checkout that is nevertheless already open is still caught
+		// by legacyOpenCheckout, which asks herdr rather than Git.
+		return nil, nil
+	}
+	records, err := parseGitWorktreeList(canonical, listing)
+	if err != nil {
+		return nil, fmt.Errorf("read the Git worktree registry for %s: %w", canonical, err)
+	}
+	if len(records) == 0 {
+		return nil, fmt.Errorf("git registered no worktrees for %s", canonical)
+	}
+	// Git lists the main worktree first, then each linked worktree.
+	primary := records[0]
+	if primary.Bare {
+		return nil, fmt.Errorf("repository for %s has a bare main worktree, so herdr has no primary checkout to open it from", canonical)
+	}
+	primaryPath, err := canonicalPath(primary.Path)
+	if err != nil {
+		return nil, fmt.Errorf("resolve the primary checkout %s: %w", primary.Path, err)
+	}
+	for _, record := range records {
+		if record.Bare {
+			continue
+		}
+		if samePath(record.Path, canonical) {
+			return &gitCheckout{Path: canonical, Primary: primaryPath}, nil
+		}
+	}
+	// Inside a work tree but not a checkout root — a monorepo subdirectory, say.
+	// herdr's provenance is per checkout, so there is nothing to bind.
+	return nil, nil
+}
+
+// legacyOpenCheckout reports the workspace herdr already has this checkout open
+// in but holds no provenance for, or "" when there is none. It is asked only
+// after provenance matching found nothing, and its answer is herdr's own
+// (worktree.list's open_workspace_id) — never another client's focus and never a
+// directory comparison of our own.
+//
+// A directory herdr says is not in a Git work tree is not an error: that is a
+// non-Git project, which keeps its existing behavior.
+func legacyOpenCheckout(client *herdrClient, checkout gitCheckout) (string, error) {
+	entries, err := client.worktreeList(checkout.Path)
+	if err != nil {
+		if herdrErrorCode(err) == "not_git_worktree" {
+			return "", nil
+		}
+		return "", fmt.Errorf("ask herdr which checkouts are open: %w", err)
+	}
+	for _, entry := range entries {
+		if !samePath(entry.Path, checkout.Path) {
+			continue
+		}
+		if entry.OpenWorkspaceID != nil && strings.TrimSpace(*entry.OpenWorkspaceID) != "" {
+			return strings.TrimSpace(*entry.OpenWorkspaceID), nil
+		}
+		return "", nil
+	}
+	return "", nil
+}
+
+// bindCheckoutProvenance attaches herdr's native checkout provenance to a
+// workspace herdr-plus just created, so opening the same project again finds it
+// instead of building a second one.
+//
+// It asks herdr to open the checkout the workspace was created for. herdr sees
+// that checkout is already open, binds it to that very workspace, and reports
+// already_open — no workspace, tab or pane is created, and the layout that was
+// just built is left exactly as it is. The worktree.opened event this emits
+// carries already_open, which the worktree layout handler skips on, so the
+// layout cannot be applied a second time.
+//
+// Every part of the answer is checked: it must be the workspace we created, on
+// the checkout we asked for, and already open. Anything else means herdr acted
+// on something other than what was intended, which is reported rather than
+// retried — one attempt, no competing lifecycle management.
+func bindCheckoutProvenance(client *herdrClient, workspaceID string, checkout gitCheckout) error {
+	result, err := client.worktreeOpenPath(checkout.Primary, checkout.Path, false)
+	if err != nil {
+		return fmt.Errorf("bind checkout %s to workspace %s: %w", checkout.Path, workspaceID, err)
+	}
+	if result.WorkspaceID != workspaceID {
+		return fmt.Errorf("herdr bound checkout %s to workspace %s, not the workspace %s just created for it", checkout.Path, result.WorkspaceID, workspaceID)
+	}
+	if !samePath(result.Path, checkout.Path) {
+		return fmt.Errorf("herdr bound workspace %s to checkout %s, not %s", workspaceID, result.Path, checkout.Path)
+	}
+	if !result.AlreadyOpen {
+		return fmt.Errorf("herdr did not recognize workspace %s as already holding checkout %s; provenance was not established", workspaceID, checkout.Path)
+	}
+	return nil
 }
 
 // chooseWorkspaceInteractively is the chooseWorkspaceFunc the projects browser

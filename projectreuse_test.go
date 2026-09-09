@@ -9,10 +9,13 @@ package main
 import (
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -1165,4 +1168,523 @@ func TestReturnToCrewChecksPaneIdentity(t *testing.T) {
 	}
 	f.assertNoMutations()
 	f.assertNotCalled("tab.focus")
+}
+
+// --- Native checkout binding (strict provenance workaround) ----------------
+
+// gitEnv is an isolated Git environment: the user's global and system config
+// must not decide whether these tests pass.
+func gitEnv() []string {
+	return append(os.Environ(),
+		"GIT_CONFIG_NOSYSTEM=1",
+		"GIT_CONFIG_GLOBAL="+os.DevNull,
+		"GIT_TERMINAL_PROMPT=0",
+		"GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@example.com",
+		"GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@example.com",
+	)
+}
+
+// runGit runs a real git command in dir, skipping the test when git is missing.
+func runGit(t *testing.T, dir string, args ...string) string {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	cmd.Env = gitEnv()
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		if _, lookErr := exec.LookPath("git"); lookErr != nil {
+			t.Skipf("git unavailable: %v", lookErr)
+		}
+		t.Fatalf("git %v in %s: %v\n%s", args, dir, err, out)
+	}
+	return strings.TrimSpace(string(out))
+}
+
+// newGitRepo creates a real repository with one commit and returns its
+// canonical primary checkout path.
+func newGitRepo(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	canonical, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		t.Fatalf("EvalSymlinks: %v", err)
+	}
+	runGit(t, canonical, "init", "-b", "main", ".")
+	if err := os.WriteFile(filepath.Join(canonical, "README"), []byte("hi\n"), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	runGit(t, canonical, "add", "README")
+	runGit(t, canonical, "commit", "-m", "first")
+	return canonical
+}
+
+// addWorktree registers a real linked worktree of repo and returns its
+// canonical path.
+func addWorktree(t *testing.T, repo, branch string) string {
+	t.Helper()
+	parent := t.TempDir()
+	canonicalParent, err := filepath.EvalSymlinks(parent)
+	if err != nil {
+		t.Fatalf("EvalSymlinks: %v", err)
+	}
+	path := filepath.Join(canonicalParent, branch)
+	runGit(t, repo, "worktree", "add", "-b", branch, path)
+	return path
+}
+
+// nativeFixture models the parts of Herdr 0.9.0 that this workaround depends
+// on, as read from its worktree API source: workspace.create records NO
+// checkout provenance, worktree.list reports which registered checkout is open
+// in which workspace (by checkout, provenance or not), and worktree.open binds
+// an already-open checkout to that same workspace and reports already_open
+// without creating or touching panes.
+//
+// It is a model, not proof. It pins herdr-plus's side of the contract — the
+// calls made, their parameters, and how every answer is validated. That the
+// real herdr behaves this way is root's native canary, not this test's.
+type nativeFixture struct {
+	*fakeHerdr
+	next int
+	// openCheckouts maps a canonical checkout path to the workspace herdr has it
+	// open in, provenance or not — herdr's open_workspace_idx_for_checkout.
+	openCheckouts map[string]string
+	// provenance maps a workspace to the checkout herdr has recorded for it.
+	provenance map[string]string
+	labels     map[string]string
+}
+
+func newNativeFixture(t *testing.T) *nativeFixture {
+	t.Helper()
+	nf := &nativeFixture{
+		fakeHerdr:     startFakeHerdr(t),
+		openCheckouts: map[string]string{},
+		provenance:    map[string]string{},
+		labels:        map[string]string{},
+	}
+
+	nf.handleFunc("workspace.create", func(req request) (any, *herdrError) {
+		nf.next++
+		id := fmt.Sprintf("w%d", nf.next)
+		cwd := fmt.Sprint(req.Params["cwd"])
+		canonical, err := filepath.EvalSymlinks(cwd)
+		if err != nil {
+			canonical = cwd
+		}
+		// Herdr 0.9.0 records no checkout provenance on this path.
+		nf.openCheckouts[canonical] = id
+		nf.labels[id] = fmt.Sprint(req.Params["label"])
+		return map[string]any{
+			"workspace": map[string]any{"workspace_id": id},
+			"tab":       map[string]any{"tab_id": id + ":t1"},
+			"root_pane": map[string]any{"pane_id": id + ":p1"},
+		}, nil
+	})
+	nf.handleFunc("workspace.list", func(request) (any, *herdrError) {
+		return map[string]any{"workspaces": nf.workspaces()}, nil
+	})
+	nf.handleFunc("workspace.get", func(req request) (any, *herdrError) {
+		id := fmt.Sprint(req.Params["workspace_id"])
+		for _, ws := range nf.workspaces() {
+			if ws["workspace_id"] == id {
+				return map[string]any{"workspace": ws}, nil
+			}
+		}
+		return nil, &herdrError{Code: "workspace_not_found", Message: "no such workspace"}
+	})
+	nf.handle("workspace.focus", map[string]any{})
+	nf.handle("tab.rename", map[string]any{})
+	nf.handleFunc("pane.split", func(request) (any, *herdrError) {
+		nf.next++
+		return map[string]any{"pane": map[string]any{"pane_id": fmt.Sprintf("s%d", nf.next)}}, nil
+	})
+	nf.handleFunc("worktree.open", func(req request) (any, *herdrError) {
+		path := fmt.Sprint(req.Params["path"])
+		ws, open := nf.openCheckouts[path]
+		if !open {
+			// Herdr would create a workspace here; this workaround never asks it to.
+			return nil, &herdrError{Code: "worktree_not_found", Message: "checkout is not open"}
+		}
+		nf.provenance[ws] = path
+		return map[string]any{
+			"workspace":    map[string]any{"workspace_id": ws},
+			"tab":          map[string]any{"tab_id": ws + ":t1"},
+			"root_pane":    map[string]any{"pane_id": ws + ":p1"},
+			"worktree":     map[string]any{"path": path, "is_linked_worktree": false, "is_bare": false, "is_detached": false, "is_prunable": false, "label": "repo"},
+			"already_open": true,
+		}, nil
+	})
+	return nf
+}
+
+// workspaces renders the current workspace inventory the way herdr does, with a
+// worktree block only for workspaces that actually carry provenance.
+func (nf *nativeFixture) workspaces() []map[string]any {
+	// Always a present array, never null: herdr sends an empty list, and the
+	// client rejects a missing one on purpose.
+	out := []map[string]any{}
+	ids := make([]string, 0, len(nf.labels))
+	for id := range nf.labels {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	for _, id := range ids {
+		if checkout, ok := nf.provenance[id]; ok {
+			out = append(out, wsInfo(id, nf.labels[id], checkout, false))
+			continue
+		}
+		out = append(out, wsInfoNoProvenance(id, nf.labels[id]))
+	}
+	return out
+}
+
+// registerWorktreeList makes worktree.list answer from Git's real registry for
+// repo, marking each checkout herdr currently has open.
+func (nf *nativeFixture) registerWorktreeList(t *testing.T, repo string) {
+	t.Helper()
+	nf.handleFunc("worktree.list", func(request) (any, *herdrError) {
+		listing := runGit(t, repo, "worktree", "list", "--porcelain")
+		entries := []any{}
+		for _, block := range strings.Split(listing, "\n\n") {
+			for _, line := range strings.Split(block, "\n") {
+				if !strings.HasPrefix(line, "worktree ") {
+					continue
+				}
+				path := strings.TrimPrefix(line, "worktree ")
+				entry := map[string]any{
+					"path": path, "is_bare": false, "is_detached": false,
+					"is_prunable": false, "is_linked_worktree": path != repo, "label": "repo",
+				}
+				if ws, open := nf.openCheckouts[path]; open {
+					entry["open_workspace_id"] = ws
+				}
+				entries = append(entries, entry)
+			}
+		}
+		return map[string]any{"type": "worktree_list", "source": map[string]any{}, "worktrees": entries}, nil
+	})
+}
+
+// crewTabs is the four-pane Crew shape, so these tests exercise a real layout
+// rather than a single bare pane.
+func crewTabs() []ProjectTab {
+	return []ProjectTab{{
+		Name: "Crew",
+		Panes: []ProjectPane{
+			{Label: "Orchestrator"},
+			{Label: "Issue", Split: SplitRight, SplitFrom: 1, Ratio: 0.25},
+			{Label: "Worker 1", Split: SplitRight, SplitFrom: 1},
+			{Label: "Worker 2", Split: SplitDown, SplitFrom: 3},
+		},
+	}}
+}
+
+// TestOpenProjectBindsThenReusesRealCheckout is the end-to-end answer to the
+// native gap: opening a Git project twice must build it once. The first open
+// creates the workspace, lays out its four panes, and binds the checkout; the
+// second finds it by provenance and only focuses it.
+func TestOpenProjectBindsThenReusesRealCheckout(t *testing.T) {
+	repo := newGitRepo(t)
+	nf := newNativeFixture(t)
+	nf.registerWorktreeList(t, repo)
+	project := Project{Name: "repo", WorkingDir: repo, Tabs: crewTabs()}
+
+	if err := openProject(nf.client(), project, reuseOptions{enabled: true}); err != nil {
+		t.Fatalf("first open: %v", err)
+	}
+
+	// It bound the checkout it just created, from the repository's primary
+	// checkout, without asking herdr to focus anything.
+	bind := nf.paramsFor("worktree.open")
+	if bind["path"] != repo {
+		t.Fatalf("worktree.open path = %v, want the project checkout %s", bind["path"], repo)
+	}
+	if bind["cwd"] != repo {
+		t.Fatalf("worktree.open cwd = %v, want the primary checkout %s", bind["cwd"], repo)
+	}
+	if bind["focus"] != false {
+		t.Fatalf("worktree.open focus = %v, want false", bind["focus"])
+	}
+	created := nf.paramsFor("workspace.create")
+	if created["cwd"] != repo {
+		t.Fatalf("workspace.create cwd = %v, want %s", created["cwd"], repo)
+	}
+	splits := 0
+	for _, m := range nf.methods() {
+		if m == "pane.split" {
+			splits++
+		}
+	}
+	if splits != 3 {
+		t.Fatalf("pane.split calls = %d, want 3 (the four-pane Crew)", splits)
+	}
+
+	// Second open: provenance now exists, so it is a focus and nothing else.
+	before := len(nf.methods())
+	if err := openProject(nf.client(), project, reuseOptions{enabled: true}); err != nil {
+		t.Fatalf("second open: %v", err)
+	}
+	second := nf.methods()[before:]
+	for _, m := range second {
+		switch m {
+		case "workspace.create", "pane.split", "tab.create", "tab.rename", "worktree.open", "pane.send_input":
+			t.Fatalf("second open issued %q; calls: %v", m, second)
+		}
+	}
+	if got := nf.calls[len(nf.calls)-1]; got.Method != "workspace.focus" || got.Params["workspace_id"] != "w1" {
+		t.Fatalf("second open ended with %s %v, want workspace.focus of w1", got.Method, got.Params)
+	}
+}
+
+// TestOpenProjectBindsLinkedAndDetachedCheckouts covers the two checkout shapes
+// that make the source parameter matter: herdr refuses a linked worktree as the
+// source of a worktree action, so the primary checkout has to come from Git's
+// registry — and a detached checkout has no branch to name it by, which is why
+// the binding is addressed by path.
+func TestOpenProjectBindsLinkedAndDetachedCheckouts(t *testing.T) {
+	t.Run("linked worktree", func(t *testing.T) {
+		repo := newGitRepo(t)
+		linked := addWorktree(t, repo, "feature")
+		nf := newNativeFixture(t)
+		nf.registerWorktreeList(t, repo)
+
+		project := Project{Name: "feature", WorkingDir: linked, Tabs: crewTabs()}
+		if err := openProject(nf.client(), project, reuseOptions{enabled: true}); err != nil {
+			t.Fatalf("open: %v", err)
+		}
+		bind := nf.paramsFor("worktree.open")
+		if bind["path"] != linked {
+			t.Fatalf("worktree.open path = %v, want the linked checkout %s", bind["path"], linked)
+		}
+		if bind["cwd"] != repo {
+			t.Fatalf("worktree.open cwd = %v, want the primary checkout %s (herdr refuses a linked source)", bind["cwd"], repo)
+		}
+	})
+
+	t.Run("detached HEAD", func(t *testing.T) {
+		repo := newGitRepo(t)
+		linked := addWorktree(t, repo, "detachable")
+		runGit(t, linked, "checkout", "--detach")
+		nf := newNativeFixture(t)
+		nf.registerWorktreeList(t, repo)
+
+		project := Project{Name: "detached", WorkingDir: linked, Tabs: crewTabs()}
+		if err := openProject(nf.client(), project, reuseOptions{enabled: true}); err != nil {
+			t.Fatalf("a detached checkout must still bind: %v", err)
+		}
+		if got := nf.paramsFor("worktree.open")["path"]; got != linked {
+			t.Fatalf("worktree.open path = %v, want %s", got, linked)
+		}
+		if _, named := nf.paramsFor("worktree.open")["branch"]; named {
+			t.Fatal("the binding must never name a branch; a detached checkout has none")
+		}
+	})
+}
+
+// TestOpenProjectRefusesLegacyOpenCheckout is the deferred-decision path: herdr
+// has the checkout open in a workspace it holds no provenance for (an older
+// build made it). Adopting it would mean trusting an identity that cannot be
+// verified, so the open is refused, visibly, and nothing is created.
+func TestOpenProjectRefusesLegacyOpenCheckout(t *testing.T) {
+	repo := newGitRepo(t)
+	nf := newNativeFixture(t)
+	nf.registerWorktreeList(t, repo)
+	// A workspace from before this behavior existed: open on the checkout, no
+	// provenance recorded, and invisible to workspace.list matching.
+	nf.openCheckouts[repo] = "wLEGACY"
+	nf.labels["wLEGACY"] = "repo"
+
+	project := Project{Name: "repo", WorkingDir: repo, Tabs: crewTabs()}
+	err := openProject(nf.client(), project, reuseOptions{enabled: true})
+	if err == nil {
+		t.Fatal("want a visible refusal, got none")
+	}
+	if !strings.Contains(err.Error(), "wLEGACY") || !strings.Contains(err.Error(), "provenance") {
+		t.Fatalf("error %q must name the workspace and say why it cannot be identified", err)
+	}
+	nf.assertNoMutations()
+	nf.assertNotCalled("workspace.focus")
+	nf.assertNotCalled("worktree.open")
+}
+
+// TestOpenProjectBindingFailuresAreVisible covers every way the binding can go
+// wrong. None may be silent: a workspace that is not bound will be duplicated on
+// the next open, so the user has to be told at the moment it happens. None of
+// them may tear down the workspace that was just built either.
+func TestOpenProjectBindingFailuresAreVisible(t *testing.T) {
+	cases := []struct {
+		name    string
+		setup   func(t *testing.T, nf *nativeFixture, repo string)
+		wantErr string
+		created bool
+	}{
+		{
+			name: "herdr cannot list checkouts",
+			setup: func(t *testing.T, nf *nativeFixture, repo string) {
+				nf.fail("worktree.list", "socket exploded")
+			},
+			wantErr: "ask herdr which checkouts are open",
+		},
+		{
+			name: "a malformed checkout listing",
+			setup: func(t *testing.T, nf *nativeFixture, repo string) {
+				nf.handle("worktree.list", map[string]any{"type": "worktree_list"})
+			},
+			wantErr: "no worktrees array",
+		},
+		{
+			name: "a checkout listing with an unusable path",
+			setup: func(t *testing.T, nf *nativeFixture, repo string) {
+				nf.handle("worktree.list", map[string]any{"worktrees": []any{map[string]any{"path": "relative/path"}}})
+			},
+			wantErr: "absolute path",
+		},
+		{
+			name: "the bind fails outright",
+			setup: func(t *testing.T, nf *nativeFixture, repo string) {
+				nf.registerWorktreeList(t, repo)
+				nf.fail("worktree.open", "worktree open failed")
+			},
+			wantErr: "bind checkout",
+			created: true,
+		},
+		{
+			name: "herdr binds a different workspace",
+			setup: func(t *testing.T, nf *nativeFixture, repo string) {
+				nf.registerWorktreeList(t, repo)
+				nf.handle("worktree.open", map[string]any{
+					"workspace":    map[string]any{"workspace_id": "wOTHER"},
+					"worktree":     map[string]any{"path": repo},
+					"already_open": true,
+				})
+			},
+			wantErr: "not the workspace",
+			created: true,
+		},
+		{
+			name: "herdr binds a different checkout",
+			setup: func(t *testing.T, nf *nativeFixture, repo string) {
+				nf.registerWorktreeList(t, repo)
+				nf.handle("worktree.open", map[string]any{
+					"workspace":    map[string]any{"workspace_id": "w1"},
+					"worktree":     map[string]any{"path": "/somewhere-else"},
+					"already_open": true,
+				})
+			},
+			wantErr: "to checkout /somewhere-else",
+			created: true,
+		},
+		{
+			name: "herdr did not recognize the workspace as already open",
+			setup: func(t *testing.T, nf *nativeFixture, repo string) {
+				nf.registerWorktreeList(t, repo)
+				nf.handle("worktree.open", map[string]any{
+					"workspace":    map[string]any{"workspace_id": "w1"},
+					"worktree":     map[string]any{"path": repo},
+					"already_open": false,
+				})
+			},
+			wantErr: "did not recognize",
+			created: true,
+		},
+		{
+			name: "a bind result with no already_open flag",
+			setup: func(t *testing.T, nf *nativeFixture, repo string) {
+				nf.registerWorktreeList(t, repo)
+				nf.handle("worktree.open", map[string]any{
+					"workspace": map[string]any{"workspace_id": "w1"},
+					"worktree":  map[string]any{"path": repo},
+				})
+			},
+			wantErr: "no already_open flag",
+			created: true,
+		},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			repo := newGitRepo(t)
+			nf := newNativeFixture(t)
+			c.setup(t, nf, repo)
+
+			project := Project{Name: "repo", WorkingDir: repo, Tabs: crewTabs()}
+			err := openProject(nf.client(), project, reuseOptions{enabled: true})
+			if err == nil {
+				t.Fatal("want a visible error, got none")
+			}
+			if c.wantErr != "" && !strings.Contains(err.Error(), c.wantErr) {
+				t.Fatalf("error %q does not mention %q", err, c.wantErr)
+			}
+			created := false
+			for _, m := range nf.methods() {
+				if m == "workspace.create" {
+					created = true
+				}
+				if m == "workspace.close" {
+					t.Fatal("a finished workspace must never be torn down by a failed binding")
+				}
+			}
+			if created != c.created {
+				t.Fatalf("workspace.create happened = %v, want %v; calls: %v", created, c.created, nf.methods())
+			}
+			if c.created && !strings.Contains(err.Error(), "open and laid out") {
+				t.Fatalf("error %q must say the workspace itself is fine", err)
+			}
+		})
+	}
+}
+
+// TestOpenProjectNonGitProjectIsUnchanged confirms the whole binding path is
+// inert for a project that is not a Git checkout: no checkout listing, no bind,
+// just the workspace it always got.
+func TestOpenProjectNonGitProjectIsUnchanged(t *testing.T) {
+	dir := t.TempDir()
+	nf := newNativeFixture(t)
+
+	project := Project{Name: "notes", WorkingDir: dir, Tabs: []ProjectTab{{Name: "shell"}}}
+	if err := openProject(nf.client(), project, reuseOptions{enabled: true}); err != nil {
+		t.Fatalf("openProject: %v", err)
+	}
+	nf.assertNotCalled("worktree.list")
+	nf.assertNotCalled("worktree.open")
+	if got := nf.paramsFor("workspace.create")["cwd"]; got != dir {
+		t.Fatalf("workspace.create cwd = %v, want %s", got, dir)
+	}
+}
+
+// TestOpenProjectSubdirectoryOfCheckoutIsNotBound documents the honest limit: a
+// project rooted at a subdirectory of a checkout is not a checkout, so herdr has
+// no provenance to record for it and none is invented.
+func TestOpenProjectSubdirectoryOfCheckoutIsNotBound(t *testing.T) {
+	repo := newGitRepo(t)
+	sub := filepath.Join(repo, "web")
+	if err := os.Mkdir(sub, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	nf := newNativeFixture(t)
+	nf.registerWorktreeList(t, repo)
+
+	project := Project{Name: "web", WorkingDir: sub, Tabs: []ProjectTab{{Name: "shell"}}}
+	if err := openProject(nf.client(), project, reuseOptions{enabled: true}); err != nil {
+		t.Fatalf("openProject: %v", err)
+	}
+	nf.assertNotCalled("worktree.open")
+	if got := nf.paramsFor("workspace.create")["cwd"]; got != sub {
+		t.Fatalf("workspace.create cwd = %v, want %s", got, sub)
+	}
+}
+
+// TestOpenProjectReuseDisabledSkipsNativeBinding confirms the default install is
+// untouched: with reuse off, neither the checkout listing nor the binding runs.
+func TestOpenProjectReuseDisabledSkipsNativeBinding(t *testing.T) {
+	repo := newGitRepo(t)
+	nf := newNativeFixture(t)
+	nf.registerWorktreeList(t, repo)
+
+	project := Project{Name: "repo", WorkingDir: repo, Tabs: []ProjectTab{{Name: "shell"}}}
+	if err := openProject(nf.client(), project, reuseOptions{}); err != nil {
+		t.Fatalf("openProject: %v", err)
+	}
+	nf.assertNotCalled("worktree.list")
+	nf.assertNotCalled("worktree.open")
+	nf.assertNotCalled("workspace.list")
 }

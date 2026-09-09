@@ -49,10 +49,29 @@ type request struct {
 	Params map[string]any `json:"params"`
 }
 
-// herdrError carries the code and human message herdr returns on failure.
+// herdrError carries the code and human message herdr returns on failure. It is
+// returned as the error itself (wrapped) so a caller can tell one refusal from
+// another with errors.As — "this directory is not a Git work tree" is a normal
+// answer to some questions, while every other code is a real failure. The text
+// is unchanged from when this was a formatted string.
 type herdrError struct {
 	Code    string `json:"code"`
 	Message string `json:"message"`
+}
+
+// Error renders the failure the way herdr-plus has always reported it.
+func (e *herdrError) Error() string {
+	return fmt.Sprintf("herdr error %s: %s", e.Code, e.Message)
+}
+
+// herdrErrorCode returns the native error code inside err, or "" when err did
+// not come from herdr.
+func herdrErrorCode(err error) string {
+	var he *herdrError
+	if errors.As(err, &he) {
+		return he.Code
+	}
+	return ""
 }
 
 // response is one JSON line returned by herdr. Exactly one of Result or Error
@@ -125,7 +144,7 @@ func (c *herdrClient) callContext(ctx context.Context, method string, params map
 		return fmt.Errorf("read response: %w", err)
 	}
 	if resp.Error != nil {
-		return fmt.Errorf("herdr error %s: %s", resp.Error.Code, resp.Error.Message)
+		return resp.Error
 	}
 	if c.timeout > 0 && resp.ID != "herdr-plus" {
 		return errors.New("malformed herdr response: request ID mismatch")
@@ -581,6 +600,96 @@ func (c *herdrClient) workspaceCreate(cwd, label string, focus bool) (workspaceI
 		return "", "", "", err
 	}
 	return out.Workspace.WorkspaceID, out.Tab.TabID, out.RootPane.PaneID, nil
+}
+
+// worktreeEntry is one checkout Git has registered for a repository, as herdr
+// reports it. OpenWorkspaceID is the workspace herdr considers that checkout
+// open in, if any — herdr's own binding, including workspaces it has no stored
+// checkout provenance for, which is exactly the case herdr-plus cannot see
+// through workspace.list.
+type worktreeEntry struct {
+	Path             string  `json:"path"`
+	Branch           *string `json:"branch"`
+	IsBare           bool    `json:"is_bare"`
+	IsDetached       bool    `json:"is_detached"`
+	IsPrunable       bool    `json:"is_prunable"`
+	IsLinkedWorktree bool    `json:"is_linked_worktree"`
+	OpenWorkspaceID  *string `json:"open_workspace_id"`
+	Label            string  `json:"label"`
+}
+
+// worktreeList asks herdr which checkouts of cwd's repository exist and which
+// are already open. It is read-only: it registers nothing and opens nothing.
+//
+// cwd may be any checkout of the repository, linked or primary. A directory
+// that is not inside a Git work tree comes back as the native "not_git_worktree"
+// refusal, which callers treat as "this project is not a Git checkout" rather
+// than as a failure.
+//
+// As with workspaceList, a missing or null array is an error, not an empty
+// inventory: the caller uses emptiness to decide that nothing is open.
+func (c *herdrClient) worktreeList(cwd string) ([]worktreeEntry, error) {
+	var out struct {
+		Worktrees *[]worktreeEntry `json:"worktrees"`
+	}
+	if err := c.call("worktree.list", map[string]any{"cwd": cwd}, &out); err != nil {
+		return nil, err
+	}
+	if out.Worktrees == nil {
+		return nil, errors.New("malformed worktree.list result: no worktrees array")
+	}
+	for i, entry := range *out.Worktrees {
+		if !filepath.IsAbs(strings.TrimSpace(entry.Path)) {
+			return nil, fmt.Errorf("malformed worktree.list result: worktree %d reports path %q, which is not an absolute path", i+1, entry.Path)
+		}
+	}
+	return *out.Worktrees, nil
+}
+
+// worktreeOpenResult is the part of worktree.open herdr-plus checks.
+type worktreeOpenResult struct {
+	WorkspaceID string
+	Path        string
+	AlreadyOpen bool
+}
+
+// worktreeOpenPath asks herdr to open an already-registered checkout by its
+// path. herdr binds the checkout to the workspace it is already open in when
+// there is one — reporting already_open — and creates a workspace only when
+// there is not. Panes in an already-open workspace are left untouched.
+//
+// It is addressed by path, never by branch: a path names exactly one registered
+// checkout, works for a detached HEAD, and cannot be ambiguous the way a branch
+// with several checkouts can. sourceCwd must be the repository's primary
+// checkout — herdr refuses a linked worktree as the source of a worktree action.
+//
+// This does not create checkouts or branches. The one caller uses it to attach
+// native checkout provenance to a workspace it just created.
+func (c *herdrClient) worktreeOpenPath(sourceCwd, path string, focus bool) (worktreeOpenResult, error) {
+	var out struct {
+		Workspace struct {
+			WorkspaceID string `json:"workspace_id"`
+		} `json:"workspace"`
+		Worktree struct {
+			Path string `json:"path"`
+		} `json:"worktree"`
+		AlreadyOpen *bool `json:"already_open"`
+	}
+	if err := c.call("worktree.open", map[string]any{
+		"cwd":   sourceCwd,
+		"path":  path,
+		"focus": focus,
+	}, &out); err != nil {
+		return worktreeOpenResult{}, err
+	}
+	if out.AlreadyOpen == nil {
+		return worktreeOpenResult{}, errors.New("malformed worktree.open result: no already_open flag")
+	}
+	return worktreeOpenResult{
+		WorkspaceID: out.Workspace.WorkspaceID,
+		Path:        out.Worktree.Path,
+		AlreadyOpen: *out.AlreadyOpen,
+	}, nil
 }
 
 // tabCreateParams builds the tab.create payload. An empty cwd is omitted so the

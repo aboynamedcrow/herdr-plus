@@ -404,10 +404,30 @@ that is an error rather than an assumption that nothing matched.
 Headless `herdr-plus open <name>` honors the same setting, except that it has
 nobody to ask: several matching workspaces is an error naming them.
 
-**Limitation:** identity comes from the checkout herdr records for a workspace,
-so this applies to projects whose `working_dir` is a git checkout herdr opened.
-A project pointing at a plain (non-git) directory has no such provenance and
-keeps the old behavior — a new workspace every time.
+Because herdr records checkout provenance only for workspaces it opened as a
+worktree — not for the ones this plugin creates — a project workspace is bound to
+its checkout right after it is built, by asking herdr to open the checkout it
+already has open. herdr recognizes the workspace, records the checkout, and
+leaves its tabs, panes and running commands untouched; the next open then finds
+it. If that binding fails you are told so at the time, and the workspace itself
+is left alone and perfectly usable.
+
+Two consequences worth knowing:
+
+- Binding a **linked worktree** asks herdr to act from the repository's primary
+  checkout, which is what herdr requires. If that primary checkout is not open,
+  herdr opens it as a background workspace of its own — its normal grouping.
+- If a workspace already has your project's checkout open but carries no
+  provenance (it was made by an older version of this plugin, say), the open is
+  **refused** with a message naming it. Nothing is created and nothing is
+  changed: that workspace cannot be verified as your project, and guessing is
+  exactly what this feature refuses to do. Close it, or open the checkout through
+  herdr's own worktree open, and try again.
+
+**Limitations:** identity comes from the checkout herdr records for a workspace,
+so this applies to projects whose `working_dir` is a git checkout root. A project
+pointing at a plain (non-git) directory, or at a *subdirectory* of a checkout,
+has no such provenance and keeps the old behavior — a new workspace every time.
 
 ## Quick Actions
 

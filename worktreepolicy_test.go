@@ -577,3 +577,35 @@ func TestPolicyApplyCreatesFromTheImmutableAcceptedBase(t *testing.T) {
 		t.Fatalf("wrong native create target: %v", params)
 	}
 }
+
+// A workspace that holds this very checkout but carries no recorded provenance
+// is refused with its own remedy, not with a claim that it moved. herdr records
+// membership on worktree.open, not on workspace.create, so this is the state a
+// workspace opened outside Plus is in.
+func TestPolicyApplyExplainsMissingParentProvenance(t *testing.T) {
+	repo, _ := policyFixture(t)
+	runGit(t, repo, "branch", "ingwon/main")
+	req := worktreeRequest{Cwd: repo, Name: "main"}
+	plan, err := planWorktree(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Fingerprint, req.Candidate = plan.Fingerprint, plan.Candidates[0].ID
+	f := startFakeHerdr(t)
+	f.handle("worktree.list", map[string]any{"worktrees": []any{listedCheckout(repo, "wparent")}})
+	f.handle("workspace.get", map[string]any{"workspace": wsInfoNoProvenance("wparent", "Primary")})
+	f.handle("worktree.open", selectionResult(plan.Candidates[0].Branch, repo))
+	f.handle("worktree.create", selectionResult(plan.Candidates[0].Branch, plan.Candidates[0].Path))
+	_, err = applyWorktreePlan(req, plan)
+	if err == nil {
+		t.Fatal("accepted a parent workspace with no recorded provenance")
+	}
+	if !strings.Contains(err.Error(), "no recorded checkout provenance") {
+		t.Fatalf("refusal does not name the missing provenance: %v", err)
+	}
+	if strings.Contains(err.Error(), "no longer holds") {
+		t.Fatalf("refusal describes a state that is not the case: %v", err)
+	}
+	f.assertNotCalled("worktree.open")
+	f.assertNotCalled("worktree.create")
+}

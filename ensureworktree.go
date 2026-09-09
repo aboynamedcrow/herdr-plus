@@ -147,6 +147,16 @@ func (s *worktreeSelection) verifyBase(root, ref string) (string, error) {
 //
 // commonDir is this repository's canonical Git common directory.
 func verifyNativeParent(parent workspaceInfo, workspace, primary, commonDir string) error {
+	// No provenance at all is a different situation from provenance that
+	// disagrees, and it has a different remedy: herdr records checkout
+	// membership when it opens a workspace as a worktree, not when one is made
+	// with workspace.create, so a workspace opened outside Plus can hold this
+	// very checkout and still carry nothing. Saying it "no longer holds the
+	// primary checkout" would describe a state that is not the case and hide
+	// the fix.
+	if parent.WorkspaceID == workspace && parent.Worktree == nil {
+		return fmt.Errorf("source workspace %s has no recorded checkout provenance; open the project through Herdr Plus so herdr records it, then retry. No worktree was created", workspace)
+	}
 	if parent.WorkspaceID != workspace || parent.Worktree == nil || parent.Worktree.IsLinkedWorktree || !samePath(parent.Worktree.CheckoutPath, primary) {
 		return errors.New("source workspace no longer holds the primary checkout; no worktree was created")
 	}

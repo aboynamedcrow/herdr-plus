@@ -23,11 +23,20 @@ import (
 // restores your previous focus.
 //
 // The invoking pane is established explicitly, exactly as the worktree action
-// does it: the picker is placed with --target-pane over the pane named in the
-// action context, never over whatever pane holds global focus by the time herdr
-// gets here — that may belong to another client's window. Failures are reported
-// through actionErrExit so they appear as a notification rather than only in the
-// plugin log, since this action has no terminal to print to.
+// does it: the context herdr injected is proved against the live pane before
+// anything opens, so a pane that has moved, changed workspace or changed
+// directory refuses the launch instead of running the chosen command somewhere
+// the user is not. The working directory the picker and its actions use is that
+// verified pane's own, never whatever pane holds global focus by the time herdr
+// gets here — that may belong to another client's window.
+//
+// Where the picker is *drawn* is native's decision for the configured
+// placement: a split, tab or zoomed pane is opened with --target-pane over the
+// invoking pane, while an overlay or popup covers the active pane because herdr
+// refuses an explicit target for those (see placementAcceptsTargetPane).
+// Failures are reported through actionErrExit so they appear as a notification
+// rather than only in the plugin log, since this action has no terminal to
+// print to.
 func launchQuickActions() {
 	pc, err := pluginContextFromEnv()
 	if err != nil {
@@ -65,13 +74,15 @@ func launchQuickActions() {
 		"--plugin", pluginID,
 		"--entrypoint", paneEntrypoint("quick-actions-picker"),
 		"--placement", placement,
-		// Place the picker over the pane that invoked the action. target_pane_id
-		// is independent of placement in the native schema, so this pins where the
-		// overlay lands without changing which placement the user configured.
-		"--target-pane", ctx.PaneId,
-		// Hand the launch context to the picker as a single shell-safe env var.
-		"--env", "HERDR_PLUS_CTX=" + enc,
 	}
+	// Name the invoking pane only where herdr honors it. An overlay or popup
+	// targets the active pane by native design and refuses an explicit one, so
+	// asking would fail the launch outright rather than place it more precisely.
+	if placementAcceptsTargetPane(placement) {
+		args = append(args, "--target-pane", ctx.PaneId)
+	}
+	// Hand the launch context to the picker as a single shell-safe env var.
+	args = append(args, "--env", "HERDR_PLUS_CTX="+enc)
 	// IMPORTANT: do not add --cwd here. The manifest registers this pane with a
 	// relative command (./bin/herdr-plus), which herdr resolves against the pane's
 	// working directory — so the pane must run in the plugin's own install dir for

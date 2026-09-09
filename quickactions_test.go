@@ -104,8 +104,10 @@ func TestLaunchQuickActionsTargetsTheVerifiedInvokingPane(t *testing.T) {
 		t.Fatalf("read recorded args: %v", err)
 	}
 	args := strings.Split(string(raw), "\n")
-	if got, ok := argValue(args, "--target-pane"); !ok || got != "w1:p2" {
-		t.Fatalf("picker was not placed over the invoking pane: %v", args)
+	// The default placement is overlay, which herdr refuses to combine with an
+	// explicit target pane, so the launch must not ask for one.
+	if got, ok := argValue(args, "--target-pane"); ok {
+		t.Fatalf("overlay launch named a target pane %q; herdr rejects that: %v", got, args)
 	}
 	if _, ok := argValue(args, "--cwd"); ok {
 		t.Fatalf("--cwd would break the plugin executable's relative command: %v", args)
@@ -173,6 +175,128 @@ func TestQuickActionsInvocationRefusesUnprovenPanes(t *testing.T) {
 			// Nothing native was changed. That the refusal also stops before the
 			// herdr CLI is opened is proved end to end by the quick-actions cases
 			// in TestActionFailureIsVisibleAndNotificationIsBounded.
+			f.assertNoMutations()
+		})
+	}
+}
+
+// herdr 0.9 refuses `--target-pane` for an overlay or popup plugin pane:
+// `invalid_params: overlay and popup plugin panes target the active pane`, with
+// no pane created. Naming one broke every launch at the default placement, so
+// the flag must appear only for the placements that honor it.
+func TestLaunchQuickActionsOnlyTargetsPanesWherePlacementAllowsIt(t *testing.T) {
+	for _, tc := range []struct {
+		placement string
+		wantFlag  bool
+	}{
+		{"overlay", false},
+		{"popup", false},
+		{"split", true},
+		{"tab", true},
+		{"zoomed", true},
+	} {
+		t.Run(tc.placement, func(t *testing.T) {
+			quickActionsInvoker(t)
+			configDir := t.TempDir()
+			t.Setenv("HERDR_PLUGIN_CONFIG_DIR", configDir)
+			config := "[quick_actions]\nplacement = \"" + tc.placement + "\"\n"
+			if err := os.WriteFile(filepath.Join(configDir, "config.toml"), []byte(config), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			record := filepath.Join(t.TempDir(), "args.txt")
+			t.Setenv("HERDR_BIN_PATH", writeArgRecordingHerdr(t, record))
+
+			launchQuickActions()
+
+			raw, err := os.ReadFile(record)
+			if err != nil {
+				t.Fatalf("read recorded args: %v", err)
+			}
+			args := strings.Split(string(raw), "\n")
+			if !containsPlacement(args, tc.placement) {
+				t.Fatalf("placement %q was not passed through: %v", tc.placement, args)
+			}
+			got, ok := argValue(args, "--target-pane")
+			if ok != tc.wantFlag {
+				t.Fatalf("placement %q: --target-pane present=%v (%q), want present=%v: %v",
+					tc.placement, ok, got, tc.wantFlag, args)
+			}
+			if tc.wantFlag && got != "w1:p2" {
+				t.Fatalf("placement %q targeted %q, want the invoking pane w1:p2", tc.placement, got)
+			}
+			// Whatever the placement, the launch context still carries the
+			// verified invoking pane and its directory: losing the placement
+			// flag must not lose the identity behind it.
+			encoded, ok := argValue(args, "--env")
+			if !ok || !strings.HasPrefix(encoded, "HERDR_PLUS_CTX=") {
+				t.Fatalf("no encoded context: %v", args)
+			}
+			ctx, err := decodeRunContext(strings.TrimPrefix(encoded, "HERDR_PLUS_CTX="))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if ctx.PaneId != "w1:p2" || ctx.WorkspaceId != "w1" {
+				t.Fatalf("placement %q lost the verified invoking context: %+v", tc.placement, ctx)
+			}
+		})
+	}
+}
+
+// The worktree picker is always an overlay, so it must never name a target pane.
+func TestPlacementTargetPaneRuleMatchesInstalledHerdr(t *testing.T) {
+	for placement, want := range map[string]bool{
+		"overlay": false, "popup": false, "split": true, "tab": true, "zoomed": true,
+	} {
+		if got := placementAcceptsTargetPane(placement); got != want {
+			t.Errorf("placementAcceptsTargetPane(%q) = %v, want %v", placement, got, want)
+		}
+	}
+	// Every placement the config accepts has a decided answer here.
+	for placement := range validPanePlacements {
+		_ = placementAcceptsTargetPane(placement)
+	}
+}
+
+// The guard compares the pane's foreground working directory, falling back to
+// the pane's own. That preference is what makes it the directory a command
+// would actually run in, so both halves are pinned here: narrowing the guard to
+// pane.cwd would silently compare the wrong directory.
+func TestInvokingPaneGuardFollowsTheForegroundDirectory(t *testing.T) {
+	foreground := t.TempDir()
+	shell := t.TempDir()
+	for _, tc := range []struct {
+		name       string
+		pane       map[string]any
+		invokedCwd string
+		accept     bool
+	}{
+		{"foreground directory is the one compared", map[string]any{
+			"pane_id": "w1:p2", "workspace_id": "w1", "tab_id": "w1:t1",
+			"foreground_cwd": foreground, "cwd": shell,
+		}, foreground, true},
+		{"the pane's own directory does not stand in for it", map[string]any{
+			"pane_id": "w1:p2", "workspace_id": "w1", "tab_id": "w1:t1",
+			"foreground_cwd": foreground, "cwd": shell,
+		}, shell, false},
+		{"absent foreground falls back to the pane directory", map[string]any{
+			"pane_id": "w1:p2", "workspace_id": "w1", "tab_id": "w1:t1", "cwd": shell,
+		}, shell, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := startFakeHerdr(t)
+			f.handle("pane.get", map[string]any{"pane": tc.pane})
+			pc := pluginContext{WorkspaceID: "w1", TabID: "w1:t1", FocusedPaneID: "w1:p2", FocusedPaneCwd: tc.invokedCwd}
+			ctx, err := quickActionsInvocation(f.client(), pc)
+			if tc.accept {
+				if err != nil {
+					t.Fatalf("refused the verified invoking pane: %v", err)
+				}
+				if ctx.WorkDir != tc.invokedCwd {
+					t.Fatalf("carried %q, want %q", ctx.WorkDir, tc.invokedCwd)
+				}
+			} else if err == nil {
+				t.Fatalf("accepted a directory the foreground process is not in: %+v", ctx)
+			}
 			f.assertNoMutations()
 		})
 	}

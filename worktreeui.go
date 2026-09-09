@@ -43,7 +43,17 @@ func launchPolicyWorktree() {
 	herdr := firstNonEmpty(os.Getenv("HERDR_BIN_PATH"), "herdr")
 	deadline, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(deadline, herdr, "plugin", "pane", "open", "--plugin", pluginID, "--entrypoint", paneEntrypoint("worktree-picker"), "--placement", "overlay", "--target-pane", ctx.PaneId, "--env", "HERDR_PLUS_CTX="+encoded)
+	// This picker is always an overlay, and herdr refuses an explicit target
+	// pane for one: it covers the active pane by design. policyInvocation has
+	// already proved the invoking pane, so the checkout this plans against is
+	// still that pane's, whatever herdr draws the overlay over.
+	args := []string{"plugin", "pane", "open", "--plugin", pluginID,
+		"--entrypoint", paneEntrypoint("worktree-picker"), "--placement", "overlay"}
+	if placementAcceptsTargetPane("overlay") {
+		args = append(args, "--target-pane", ctx.PaneId)
+	}
+	args = append(args, "--env", "HERDR_PLUS_CTX="+encoded)
+	cmd := exec.CommandContext(deadline, herdr, args...)
 	cmd.WaitDelay = time.Second
 	cmd.Stdout, cmd.Stderr = os.Stdout, os.Stderr
 	if err := cmd.Run(); err != nil {

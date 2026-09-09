@@ -658,12 +658,13 @@ type worktreeOpenResult struct {
 //
 // It is addressed by path, never by branch: a path names exactly one registered
 // checkout, works for a detached HEAD, and cannot be ambiguous the way a branch
-// with several checkouts can. sourceCwd must be the repository's primary
-// checkout — herdr refuses a linked worktree as the source of a worktree action.
+// with several checkouts can. sourceWorkspace must hold the primary checkout.
+// An explicit workspace prevents Herdr from silently creating an empty parent;
+// if that workspace was closed, the native call fails instead.
 //
 // This does not create checkouts or branches. The one caller uses it to attach
 // native checkout provenance to a workspace it just created.
-func (c *herdrClient) worktreeOpenPath(sourceCwd, path string, focus bool) (worktreeOpenResult, error) {
+func (c *herdrClient) worktreeOpenPath(sourceWorkspace, path string, focus bool) (worktreeOpenResult, error) {
 	var out struct {
 		Workspace struct {
 			WorkspaceID string `json:"workspace_id"`
@@ -674,9 +675,9 @@ func (c *herdrClient) worktreeOpenPath(sourceCwd, path string, focus bool) (work
 		AlreadyOpen *bool `json:"already_open"`
 	}
 	if err := c.call("worktree.open", map[string]any{
-		"cwd":   sourceCwd,
-		"path":  path,
-		"focus": focus,
+		"workspace_id": sourceWorkspace,
+		"path":         path,
+		"focus":        focus,
 	}, &out); err != nil {
 		return worktreeOpenResult{}, err
 	}

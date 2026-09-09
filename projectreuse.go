@@ -308,6 +308,8 @@ type gitCheckout struct {
 	Path string
 	// Primary is the canonical path of the repository's main worktree.
 	Primary string
+	// For linked checkouts, the already-open, verified primary workspace.
+	PrimaryWorkspace string
 }
 
 // resolveGitCheckout reports how a project's directory sits in Git's own
@@ -422,6 +424,29 @@ func resolveCheckoutForReuse(client *herdrClient, dir string) (*gitCheckout, err
 
 	raw := matches[0].OpenWorkspaceID
 	if raw == nil {
+		if !samePath(checkout.Path, checkout.Primary) {
+			var parents []worktreeEntry
+			for _, entry := range entries {
+				if samePath(entry.Path, checkout.Primary) {
+					parents = append(parents, entry)
+				}
+			}
+			if len(parents) != 1 || parents[0].OpenWorkspaceID == nil {
+				return nil, fmt.Errorf("open the primary-checkout project at %s first, then open %s; nothing was created, because native grouping would otherwise create an empty parent workspace", checkout.Primary, checkout.Path)
+			}
+			id := *parents[0].OpenWorkspaceID
+			if !workspaceIDPattern.MatchString(id) {
+				return nil, fmt.Errorf("herdr returned an invalid primary workspace id; nothing was created")
+			}
+			parent, err := client.workspaceGet(id)
+			if err != nil {
+				return nil, fmt.Errorf("verify primary workspace %s: %w", id, err)
+			}
+			if parent.WorkspaceID != id || parent.Worktree == nil || parent.Worktree.IsLinkedWorktree || !samePath(parent.Worktree.CheckoutPath, checkout.Primary) {
+				return nil, fmt.Errorf("primary workspace %s has no matching primary-checkout provenance; open the primary-checkout project at %s first", id, checkout.Primary)
+			}
+			checkout.PrimaryWorkspace = id
+		}
 		// Registered, consistent, and not open anywhere: create it, then bind it.
 		return checkout, nil
 	}
@@ -429,7 +454,7 @@ func resolveCheckoutForReuse(client *herdrClient, dir string) (*gitCheckout, err
 	if !workspaceIDPattern.MatchString(open) {
 		return nil, fmt.Errorf("herdr reports %s is already open, but gave its workspace id in an unusable form (%q); nothing was created or changed", checkout.Path, *raw)
 	}
-	return nil, fmt.Errorf("workspace %s already has %s checked out, but herdr holds no checkout provenance for it — so it cannot be identified as this project. Nothing was created or changed. Close that workspace and open the project again, or open the checkout through herdr's own worktree open so it carries provenance", open, checkout.Path)
+	return nil, fmt.Errorf("herdr reports workspace %s in checkout %s, but holds no checkout provenance for it — so it cannot be identified as this project. Nothing was created or changed. Inspect that workspace; close it when safe, or open the checkout through herdr's own worktree open so it carries provenance", open, checkout.Path)
 }
 
 // bindCheckoutProvenance attaches herdr's native checkout provenance to a
@@ -448,7 +473,21 @@ func resolveCheckoutForReuse(client *herdrClient, dir string) (*gitCheckout, err
 // on something other than what was intended, which is reported rather than
 // retried — one attempt, no competing lifecycle management.
 func bindCheckoutProvenance(client *herdrClient, workspaceID string, checkout gitCheckout) error {
-	result, err := client.worktreeOpenPath(checkout.Primary, checkout.Path, false)
+	source := workspaceID
+	if !samePath(checkout.Path, checkout.Primary) {
+		source = checkout.PrimaryWorkspace
+		if source == "" {
+			return fmt.Errorf("no verified primary workspace for checkout %s", checkout.Path)
+		}
+		parent, err := client.workspaceGet(source)
+		if err != nil {
+			return fmt.Errorf("revalidate primary workspace %s: %w", source, err)
+		}
+		if parent.WorkspaceID != source || parent.Worktree == nil || parent.Worktree.IsLinkedWorktree || !samePath(parent.Worktree.CheckoutPath, checkout.Primary) {
+			return fmt.Errorf("primary workspace %s changed checkout before binding", source)
+		}
+	}
+	result, err := client.worktreeOpenPath(source, checkout.Path, false)
 	if err != nil {
 		return fmt.Errorf("bind checkout %s to workspace %s: %w", checkout.Path, workspaceID, err)
 	}
@@ -530,6 +569,7 @@ func (m workspacePickerModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
+		m.list.setViewport(max(1, m.height-6-listPromptLines), m.width)
 		return m, nil
 
 	case tea.KeyMsg:

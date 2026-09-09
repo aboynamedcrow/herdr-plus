@@ -420,17 +420,24 @@ anything is created, because at that point nobody can tell whether the project i
 already open, and a wrong guess is the duplicate workspace this is meant to
 prevent.
 
-Three consequences worth knowing:
+Binding has these limits:
 
 - Binding a **linked worktree** asks herdr to act from the repository's primary
-  checkout, which is what herdr requires. If that primary checkout is not open,
-  herdr opens it as a background workspace of its own — its normal grouping.
-- If a workspace already has your project's checkout open but carries no
-  provenance (it was made by an older version of this plugin, say), the open is
+  checkout, which is what herdr requires. Open the primary-checkout project
+  first. Otherwise this plugin refuses before creating anything: native grouping
+  would create an empty parent that could later shadow the primary project's
+  configured layout. Binding names the verified parent workspace explicitly, so
+  closing it during the operation produces an error, not another parent.
+- If herdr reports an open workspace in your project's checkout but it carries no
+  provenance (including a scratch workspace whose shell entered that checkout), the open is
   **refused** with a message naming it. Nothing is created and nothing is
   changed: that workspace cannot be verified as your project, and guessing is
-  exactly what this feature refuses to do. Close it, or open the checkout through
-  herdr's own worktree open, and try again.
+  exactly what this feature refuses to do. Inspect it and close it when safe, or
+  open the checkout through herdr's own worktree open, and try again.
+- Reuse requires a repository herdr can list and a non-bare primary checkout.
+  Bare-main repositories are unsupported with this opt-in setting; turn it off
+  to retain the original project-opening behavior. Repository trust errors are
+  reported without granting trust automatically.
 
 **Limitations:** identity comes from the checkout herdr records for a workspace,
 so this applies to projects whose `working_dir` is a git checkout root. A project

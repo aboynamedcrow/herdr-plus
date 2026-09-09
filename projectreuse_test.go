@@ -1312,6 +1312,20 @@ func newNativeFixture(t *testing.T) *nativeFixture {
 	})
 	nf.worktreeListFromGit()
 	nf.handleFunc("worktree.open", func(req request) (any, *herdrError) {
+		if source, explicit := req.Params["workspace_id"]; explicit {
+			if _, exists := nf.labels[fmt.Sprint(source)]; !exists {
+				return nil, &herdrError{Code: "workspace_not_found", Message: "source was closed"}
+			}
+		} else {
+			primary := fmt.Sprint(req.Params["cwd"])
+			if _, exists := nf.openCheckouts[primary]; !exists {
+				nf.next++
+				id := fmt.Sprintf("w%d", nf.next)
+				nf.openCheckouts[primary] = id
+				nf.provenance[id] = primary
+				nf.labels[id] = "Native empty parent"
+			}
+		}
 		path := fmt.Sprint(req.Params["path"])
 		ws, open := nf.openCheckouts[path]
 		if !open {
@@ -1439,8 +1453,8 @@ func TestOpenProjectBindsThenReusesRealCheckout(t *testing.T) {
 	if bind["path"] != repo {
 		t.Fatalf("worktree.open path = %v, want the project checkout %s", bind["path"], repo)
 	}
-	if bind["cwd"] != repo {
-		t.Fatalf("worktree.open cwd = %v, want the primary checkout %s", bind["cwd"], repo)
+	if bind["workspace_id"] != "w1" || bind["cwd"] != nil {
+		t.Fatalf("binding must use the newly created primary workspace: %v", bind)
 	}
 	if bind["focus"] != false {
 		t.Fatalf("worktree.open focus = %v, want false", bind["focus"])
@@ -1486,6 +1500,9 @@ func TestOpenProjectBindsLinkedAndDetachedCheckouts(t *testing.T) {
 		repo := newGitRepo(t)
 		linked := addWorktree(t, repo, "feature")
 		nf := newNativeFixture(t)
+		nf.openCheckouts[repo] = "wparent"
+		nf.provenance["wparent"] = repo
+		nf.labels["wparent"] = "Primary"
 
 		project := Project{Name: "feature", WorkingDir: linked, Tabs: crewTabs()}
 		if err := openProject(nf.client(), project, reuseOptions{enabled: true}); err != nil {
@@ -1495,8 +1512,8 @@ func TestOpenProjectBindsLinkedAndDetachedCheckouts(t *testing.T) {
 		if bind["path"] != linked {
 			t.Fatalf("worktree.open path = %v, want the linked checkout %s", bind["path"], linked)
 		}
-		if bind["cwd"] != repo {
-			t.Fatalf("worktree.open cwd = %v, want the primary checkout %s (herdr refuses a linked source)", bind["cwd"], repo)
+		if bind["workspace_id"] != "wparent" || bind["cwd"] != nil {
+			t.Fatalf("binding must use the verified primary workspace: %v", bind)
 		}
 	})
 
@@ -1505,6 +1522,9 @@ func TestOpenProjectBindsLinkedAndDetachedCheckouts(t *testing.T) {
 		linked := addWorktree(t, repo, "detachable")
 		runGit(t, linked, "checkout", "--detach")
 		nf := newNativeFixture(t)
+		nf.openCheckouts[repo] = "wparent"
+		nf.provenance["wparent"] = repo
+		nf.labels["wparent"] = "Primary"
 
 		project := Project{Name: "detached", WorkingDir: linked, Tabs: crewTabs()}
 		if err := openProject(nf.client(), project, reuseOptions{enabled: true}); err != nil {
@@ -1517,6 +1537,55 @@ func TestOpenProjectBindsLinkedAndDetachedCheckouts(t *testing.T) {
 			t.Fatal("the binding must never name a branch; a detached checkout has none")
 		}
 	})
+}
+
+func TestLinkedFirstCannotShadowPrimaryProject(t *testing.T) {
+	repo := newGitRepo(t)
+	linked := addWorktree(t, repo, "feature")
+	nf := newNativeFixture(t)
+	child := Project{Name: "Feature", WorkingDir: linked, Tabs: crewTabs()}
+	err := openProject(nf.client(), child, reuseOptions{enabled: true})
+	if err == nil || !strings.Contains(err.Error(), "open the primary-checkout project") {
+		t.Fatalf("linked-first should explain the prerequisite, got %v", err)
+	}
+	if len(nf.labels) != 0 {
+		t.Fatalf("linked-first created a workspace: %v", nf.labels)
+	}
+	nf.assertNoMutations()
+	if err := openProject(nf.client(), Project{Name: "Primary", WorkingDir: repo, Tabs: crewTabs()}, reuseOptions{enabled: true}); err != nil {
+		t.Fatal(err)
+	}
+	if got := nf.paramsFor("workspace.create")["label"]; got != "Primary" {
+		t.Fatalf("primary template was shadowed: %v", got)
+	}
+	if err := openProject(nf.client(), child, reuseOptions{enabled: true}); err != nil {
+		t.Fatal(err)
+	}
+	if len(nf.labels) != 2 {
+		t.Fatalf("expected only the two requested projects: %v", nf.labels)
+	}
+	if got := nf.calls[len(nf.calls)-1]; got.Method != "worktree.open" || got.Params["workspace_id"] != "w1" {
+		t.Fatalf("linked binding omitted explicit primary: %v", got)
+	}
+}
+
+func TestBindingRefusesChangedOrClosedParent(t *testing.T) {
+	for _, state := range []string{"closed", "changed"} {
+		t.Run(state, func(t *testing.T) {
+			repo := newGitRepo(t)
+			linked := addWorktree(t, repo, "feature")
+			nf := newNativeFixture(t)
+			if state == "changed" {
+				nf.labels["wparent"] = "Changed"
+				nf.provenance["wparent"] = linked
+			}
+			err := bindCheckoutProvenance(nf.client(), "wchild", gitCheckout{Path: linked, Primary: repo, PrimaryWorkspace: "wparent"})
+			if err == nil {
+				t.Fatal("closed or changed parent was accepted")
+			}
+			nf.assertNoMutations()
+		})
+	}
 }
 
 // TestOpenProjectRefusesLegacyOpenCheckout is the deferred-decision path: herdr

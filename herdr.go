@@ -8,6 +8,7 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -25,6 +26,9 @@ import (
 // herdr runs us.
 type herdrClient struct {
 	socketPath string
+	// Opt-in bound for headless ensure-worktree; existing callers retain their
+	// transport behavior. Includes dial, write and response read time.
+	timeout time.Duration
 }
 
 // newHerdrClient builds a client from the HERDR_SOCKET_PATH environment
@@ -61,11 +65,53 @@ type response struct {
 // call sends a single request over a fresh connection and decodes the result
 // into out (which may be nil when the caller does not care about the payload).
 func (c *herdrClient) call(method string, params map[string]any, out any) error {
+	if c.timeout > 0 {
+		ctx, cancel := context.WithTimeout(context.Background(), c.timeout)
+		defer cancel()
+		type reply struct {
+			result json.RawMessage
+			err    error
+		}
+		done := make(chan reply, 1)
+		go func() {
+			// Keep decoding private: a timeout must not leave a goroutine writing
+			// into the caller's output after call returns.
+			var result json.RawMessage
+			err := c.callContext(ctx, method, params, &result)
+			done <- reply{result, err}
+		}()
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("herdr IPC %s: %w (native outcome unknown; no retry)", method, ctx.Err())
+		case r := <-done:
+			if ctx.Err() != nil {
+				return fmt.Errorf("herdr IPC %s: %w (native outcome unknown; no retry)", method, ctx.Err())
+			}
+			if r.err != nil {
+				return r.err
+			}
+			if out != nil {
+				if err := json.Unmarshal(r.result, out); err != nil {
+					return fmt.Errorf("decode result: %w", err)
+				}
+			}
+			return nil
+		}
+	}
+	return c.callContext(context.Background(), method, params, out)
+}
+
+func (c *herdrClient) callContext(ctx context.Context, method string, params map[string]any, out any) error {
 	conn, err := dialHerdr(c.socketPath)
 	if err != nil {
 		return fmt.Errorf("connect herdr IPC endpoint: %w", err)
 	}
 	defer conn.Close()
+	stop := context.AfterFunc(ctx, func() { conn.Close() })
+	defer stop()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 
 	// json.Encoder.Encode appends a trailing newline, which is exactly the
 	// framing herdr expects for each request.
@@ -79,6 +125,9 @@ func (c *herdrClient) call(method string, params map[string]any, out any) error 
 	}
 	if resp.Error != nil {
 		return fmt.Errorf("herdr error %s: %s", resp.Error.Code, resp.Error.Message)
+	}
+	if c.timeout > 0 && resp.ID != "herdr-plus" {
+		return errors.New("malformed herdr response: request ID mismatch")
 	}
 	if out != nil {
 		if err := json.Unmarshal(resp.Result, out); err != nil {

@@ -49,6 +49,9 @@ func main() {
 		case "open":
 			runOpen(os.Args[2:])
 			return
+		case "ensure-worktree":
+			runEnsureWorktree(os.Args[2:])
+			return
 		case "ping":
 			runPing()
 			return

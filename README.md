@@ -663,3 +663,5 @@ make vet       # go vet ./...
 
 The marketing + docs site lives in `www/` (Hugo + Tailwind). Build it with
 `make site`, or run it locally with live reload via `make site-dev`.
+
+Projects and Worktree action failures appear as a Herdr notification and in the plugin log. Notification delivery is best effort when the server is unavailable or notifications are suppressed. This fork requires Herdr 0.9.0 or newer.

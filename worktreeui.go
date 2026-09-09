@@ -31,20 +31,20 @@ func policyInvocation(client *herdrClient, pc pluginContext) (RunContext, error)
 func launchPolicyWorktree() {
 	pc, err := pluginContextFromEnv()
 	if err != nil {
-		errExit(err)
+		actionErrExit(err)
 	}
 	client, err := newHerdrClient()
 	if err != nil {
-		errExit(err)
+		actionErrExit(err)
 	}
 	client.timeout = 15 * time.Second
 	ctx, err := policyInvocation(client, pc)
 	if err != nil {
-		errExit(err)
+		actionErrExit(err)
 	}
 	encoded, err := ctx.encode()
 	if err != nil {
-		errExit(err)
+		actionErrExit(err)
 	}
 	herdr := firstNonEmpty(os.Getenv("HERDR_BIN_PATH"), "herdr")
 	deadline, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -53,7 +53,7 @@ func launchPolicyWorktree() {
 	cmd.WaitDelay = time.Second
 	cmd.Stdout, cmd.Stderr = os.Stdout, os.Stderr
 	if err := cmd.Run(); err != nil {
-		errExit("open worktree picker:", err)
+		actionErrExit("open worktree picker:", err)
 	}
 }
 

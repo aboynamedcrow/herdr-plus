@@ -32,12 +32,12 @@ import (
 func launchProjects(args []string) {
 	pick, err := parseProjectsArgs(args)
 	if err != nil {
-		errExit(err)
+		actionErrExit(err)
 	}
 
 	cfg, err := loadPluginConfig()
 	if err != nil {
-		errExit(err)
+		actionErrExit(err)
 	}
 	placement := resolvePlacement(cfg.Projects.Placement, "zoomed")
 
@@ -49,16 +49,16 @@ func launchProjects(args []string) {
 	if !pick && strings.TrimSpace(cfg.Projects.CrewTab) != "" {
 		pc, err := pluginContextFromEnv()
 		if err != nil {
-			errExit(err)
+			actionErrExit(err)
 		}
 		if strings.TrimSpace(pc.WorkspaceID) != "" {
 			client, err := newHerdrClient()
 			if err != nil {
-				errExit(err)
+				actionErrExit(err)
 			}
 			focused, err := returnToCrew(client, pc, cfg.Projects.CrewTab)
 			if err != nil {
-				errExit(err)
+				actionErrExit(err)
 			}
 			if focused {
 				return
@@ -68,7 +68,7 @@ func launchProjects(args []string) {
 
 	enc, err := ctx.encode()
 	if err != nil {
-		errExit("could not encode run context:", err)
+		actionErrExit("could not encode run context:", err)
 	}
 
 	// HERDR_BIN_PATH points at the running herdr binary; it is the portable way to
@@ -92,7 +92,7 @@ func launchProjects(args []string) {
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	if err := cmd.Run(); err != nil {
-		errExit("could not open the projects browser:", err)
+		actionErrExit("could not open the projects browser:", err)
 	}
 }
 

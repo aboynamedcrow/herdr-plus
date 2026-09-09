@@ -187,6 +187,7 @@ type worktreeEvent struct {
 	RepoRoot     string
 	Branch       string
 	CheckoutPath string
+	AlreadyOpen  bool
 }
 
 // worktreeCreatedPayload mirrors the JSON herdr puts in HERDR_PLUGIN_EVENT_JSON
@@ -194,7 +195,8 @@ type worktreeEvent struct {
 // Only the fields we use are declared.
 type worktreeCreatedPayload struct {
 	Data struct {
-		Workspace struct {
+		AlreadyOpen bool `json:"already_open"`
+		Workspace   struct {
 			WorkspaceID string `json:"workspace_id"`
 			ActiveTabID string `json:"active_tab_id"`
 			Worktree    struct {
@@ -223,6 +225,7 @@ func parseWorktreeEvent(eventJSON string, getenv func(string) string) (worktreeE
 		}
 	}
 	return worktreeEvent{
+		AlreadyOpen:  p.Data.AlreadyOpen,
 		WorkspaceID:  firstNonEmpty(getenv("HERDR_WORKSPACE_ID"), p.Data.Workspace.WorkspaceID),
 		RootTabID:    firstNonEmpty(getenv("HERDR_TAB_ID"), p.Data.Workspace.ActiveTabID),
 		RootPaneID:   getenv("HERDR_PANE_ID"),
@@ -246,6 +249,13 @@ func runOnWorktreeEvent(_ []string) {
 	ev, err := parseWorktreeEvent(os.Getenv("HERDR_PLUGIN_EVENT_JSON"), os.Getenv)
 	if err != nil {
 		errExit("worktree event:", err)
+	}
+	// A native reopen can return an existing workspace with just one pane.
+	// That pane may be busy or intentionally customized; its count does not
+	// authorize applying a new layout over it.
+	if ev.AlreadyOpen {
+		fmt.Printf("herdr-plus: worktree workspace %q is already open; leaving its layout intact.\n", ev.WorkspaceID)
+		return
 	}
 
 	layouts, err := loadWorktreeLayouts()
@@ -279,9 +289,16 @@ func runOnWorktreeEvent(_ []string) {
 	// handler can fire for a workspace we already laid out. A freshly created or
 	// opened worktree workspace has exactly one (root) pane, so more than one pane
 	// means the layout is already in place and we skip rather than stack a second
-	// copy of the tabs on top. A pane.list error returns 0, which fails open
-	// (proceeds) rather than wrongly skipping.
-	if n, err := client.workspacePaneCount(ev.WorkspaceID); err == nil && n > 1 {
+	// copy of the tabs on top. Failed or empty inventory cannot establish that
+	// this workspace is fresh, so leave it untouched and report the failure.
+	n, err := client.workspacePaneCount(ev.WorkspaceID)
+	if err != nil {
+		errExit("inspect worktree workspace before layout:", err)
+	}
+	if n == 0 {
+		errExit("worktree workspace has no reported panes; refusing layout")
+	}
+	if n > 1 {
 		fmt.Printf("herdr-plus: worktree workspace %q already has %d panes; skipping layout %q (already applied).\n", ev.WorkspaceID, n, layout.source)
 		return
 	}

@@ -6,21 +6,32 @@
 #
 # Build herdr-plus for `herdr plugin install`. herdr runs this as the manifest's
 # [[build]] step after cloning the repo, in the plugin root, with no plugin
-# context and no guaranteed Go toolchain.
+# context.
 #
-# Prefer a local Go toolchain — it builds the exact cloned source. When Go is
-# absent, fall back to downloading the latest prebuilt release binary via
-# install.sh, so installing the plugin works without Go. Either way the result is
-# ./bin/herdr-plus, which the manifest's actions and panes invoke.
+# A Go toolchain is required. The plugin must be the exact source herdr just
+# checked out, so this script only ever runs `go build` against this directory.
+# There is deliberately no fallback to a prebuilt release binary: a published
+# release does not contain the code in this checkout, so installing it would
+# silently run something other than what was reviewed. A missing toolchain or a
+# failed compile fails the install instead. The result is ./bin/herdr-plus,
+# which the manifest's actions and panes invoke.
 
 set -eu
 
-mkdir -p bin
-
-if command -v go >/dev/null 2>&1; then
-	echo "herdr-plus: building from source (go build)…" >&2
-	exec go build -o bin/herdr-plus .
+if ! command -v go >/dev/null 2>&1; then
+	printf '%s\n' \
+		'herdr-plus: no Go toolchain found on PATH.' \
+		'' \
+		'This plugin is built from the source herdr just checked out, so a Go' \
+		'toolchain is required. There is no prebuilt-binary fallback, because a' \
+		'published release does not contain the code in this checkout.' \
+		'' \
+		'Install Go from https://go.dev/dl/, make sure `go` is on PATH, then run' \
+		'`herdr plugin install` again.' >&2
+	exit 1
 fi
 
-echo "herdr-plus: no Go toolchain found — downloading the latest prebuilt binary…" >&2
-INSTALL_DIR="$(pwd)/bin" sh install.sh
+mkdir -p bin
+
+echo "herdr-plus: building from source (go build)…" >&2
+exec go build -o bin/herdr-plus .

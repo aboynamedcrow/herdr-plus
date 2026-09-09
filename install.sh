@@ -22,9 +22,8 @@
 #   curl -fsSL .../install.sh | VERSION=v0.0.1 sh
 #
 # Designed to run under POSIX `sh` so it works on Alpine / BusyBox / minimal
-# SSH targets in addition to bash on a normal Linux box. herdr plugin install
-# also reuses it (via scripts/build.sh) to fetch a prebuilt binary when the
-# machine has no Go toolchain.
+# SSH targets in addition to bash on a normal Linux box. Plugin installation
+# builds the checked-out source through scripts/build.sh and requires Go.
 
 set -eu
 

@@ -192,21 +192,14 @@ func openProject(client *herdrClient, p Project, reuse reuseOptions) error {
 		}
 
 		// No workspace carries provenance for this checkout — but herdr may still
-		// have it open in a workspace it holds no provenance for (one from an older
-		// build of this plugin, say). Read Git's registry, then herdr's, and refuse
-		// rather than duplicate it. See the commentary in projectreuse.go.
-		checkout, err = resolveGitCheckout(dir)
+		// have it open in a workspace it holds none for (one from an older build of
+		// this plugin, say), and the question of whether this is even a Git checkout
+		// belongs to herdr rather than to a local Git command that might not answer.
+		// Everything uncertain is settled here, before anything is created. See the
+		// commentary in projectreuse.go.
+		checkout, err = resolveCheckoutForReuse(client, dir)
 		if err != nil {
 			return err
-		}
-		if checkout != nil {
-			open, err := legacyOpenCheckout(client, *checkout)
-			if err != nil {
-				return err
-			}
-			if open != "" {
-				return fmt.Errorf("workspace %s already has %s checked out, but herdr holds no checkout provenance for it — so it cannot be identified as this project. Nothing was created or changed. Close that workspace and open the project again, or open the checkout through herdr's own worktree open so it carries provenance", open, checkout.Path)
-			}
 		}
 	}
 

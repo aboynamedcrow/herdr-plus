@@ -412,7 +412,15 @@ leaves its tabs, panes and running commands untouched; the next open then finds
 it. If that binding fails you are told so at the time, and the workspace itself
 is left alone and perfectly usable.
 
-Two consequences worth knowing:
+Whether a project is a Git checkout at all is herdr's answer, not a guess: if
+herdr says the directory is not inside a Git work tree, the project opens as it
+always has. If Git itself cannot be read — no `git` on `PATH`, a corrupt or
+unreadable registry, a listing that contradicts herdr — you get an error *before*
+anything is created, because at that point nobody can tell whether the project is
+already open, and a wrong guess is the duplicate workspace this is meant to
+prevent.
+
+Three consequences worth knowing:
 
 - Binding a **linked worktree** asks herdr to act from the repository's primary
   checkout, which is what herdr requires. If that primary checkout is not open,

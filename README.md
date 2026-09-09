@@ -197,6 +197,59 @@ is the scriptable entry point for spinning up a known workspace in one shot — 
 for shell aliases, scripts, and AI agents. (To get `herdr-plus` on your `PATH`, see
 [Just the binary](#just-the-binary).)
 
+### Ensuring a worktree (headless API)
+
+```sh
+herdr-plus ensure-worktree --cwd /absolute/repo --branch feature/a \
+  --base main --path '/absolute/worktrees/new checkout' [--focus]
+```
+
+`--cwd` and `--branch` are required. The command resolves symlinks and the Git
+repository root from the explicit cwd; it does not select another client's
+focused pane or load project configuration. Branch names are literal Git branch
+names. `--base` is a remote branch tail under `origin` (for example, `main` or
+`release/stable`), not a revision expression or fetch refspec. `--path` must be
+absolute. Supplied values are validated even when existing state makes them
+unnecessary. Duplicate string flags and positional arguments are rejected.
+
+| Git state for the exact branch | Native operation |
+| --- | --- |
+| Registered checkout | `worktree.open` with cwd, branch, and focus; Git's registered path wins over any supplied path. |
+| Local branch without a checkout | `worktree.create` with cwd, branch, focus, and path if supplied; preserves the branch without fetching or passing a base. |
+| Neither | Requires base and path; runs `git fetch origin BASE`, then `worktree.create` with base `origin/BASE` and the explicit path. |
+
+An existing target file, directory, or dangling symlink is refused before creating
+a checkout. An existing registered checkout needs neither base nor path. Focus is
+false by default; `--focus` opts in. Plus does not create or remove Git worktrees,
+reset branches, retry native refusals, or apply a layout itself. Native Herdr owns
+the create/open operation and any resulting event handling.
+
+Success writes exactly one JSON object to stdout, preserving the native result:
+
+```json
+{"result":{"workspace":{"workspace_id":"w1"},"root_pane":{"pane_id":"w1:p1"},"worktree":{"path":"/absolute/worktrees/new checkout","branch":"feature/a"},"already_open":true}}
+```
+
+The example IDs are illustrative. Actual workspace and root-pane IDs must come
+from Herdr; the command validates them and the returned worktree path/branch
+before emitting success. Additional native fields, including `already_open` when
+native open supplies it, pass through. Failures write stderr and exit nonzero
+without a success object. Git queries have 10-second limits, fetch has a 2-minute
+limit, and native IPC has a 30-second limit. A timed-out native mutation has an
+unknown outcome and is never automatically retried.
+
+Run `go test -run 'TestEnsureWorktree' ./...` for the API verification recipe,
+then `go test ./...` and `git diff --check`. The focused suite builds and executes
+the real CLI, uses disposable Git repositories with isolated Git configuration,
+and checks calls through a synthetic Unix socket. Fetch is intercepted by a
+controlled executable; tests never fetch a remote or mutate live Herdr. Fixtures,
+sockets, and owned processes are cleaned up. The Unix socket suite is skipped on
+Windows; named-pipe and installed/native acceptance remain separate gates.
+
+Naming policy, issue-ID lookup, contextual P, W/G/L caller migration, and
+installed/native acceptance are separate dependent slices. This command does not
+change those callers or their existing behavior.
+
 ### Grouping
 
 A project may set an optional `group` to cluster related projects under a heading

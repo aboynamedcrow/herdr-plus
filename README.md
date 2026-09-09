@@ -493,7 +493,10 @@ primary workspace; the older explicit-cwd interface remains available.
 
 A fuzzy launcher for one-off commands. Trigger it (action
 `cloudmanic.herdr-plus.quick-actions`), fuzzy-pick an action, and it runs in the
-directory you launched from. Actions are TOML files in the `quick-actions/` subdir
+directory you launched from. The picker opens over the pane the action fired
+from — verified against herdr, not read from live focus, so another client
+moving focus cannot land it somewhere else — and an invoking pane that cannot be
+established is reported as a notification instead of opening a picker. Actions are TOML files in the `quick-actions/` subdir
 of [herdr-plus's config dir](#configuration) (seeded with editable examples on
 first run). A repo can also ship its own in `<repo>/.herdr-plus/quick-actions/`, shown
 under a **Project** heading above your **Global** ones — this repo ships

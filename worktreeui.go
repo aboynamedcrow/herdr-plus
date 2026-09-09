@@ -15,15 +15,9 @@ import (
 
 // W is tied to the invoking pane, even if another client moves global focus.
 func policyInvocation(client *herdrClient, pc pluginContext) (RunContext, error) {
-	if pc.WorkspaceID == "" || pc.FocusedPaneID == "" || !filepath.IsAbs(pc.FocusedPaneCwd) {
-		return RunContext{}, fmt.Errorf("worktree action needs an explicit invoking workspace, pane and directory")
-	}
-	pane, err := client.paneGet(pc.FocusedPaneID)
+	pane, err := verifyInvokingPane(client, pc, "worktree")
 	if err != nil {
 		return RunContext{}, err
-	}
-	if pane.PaneID != pc.FocusedPaneID || pane.WorkspaceID != pc.WorkspaceID || !samePath(firstNonEmpty(pane.ForegroundCwd, pane.Cwd), pc.FocusedPaneCwd) {
-		return RunContext{}, fmt.Errorf("invoking pane changed; invoke the worktree action again")
 	}
 	return RunContext{WorkDir: pc.FocusedPaneCwd, PaneId: pc.FocusedPaneID, WorkspaceId: pc.WorkspaceID, TabId: pane.TabID}, nil
 }

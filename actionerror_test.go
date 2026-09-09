@@ -30,7 +30,9 @@ func TestActionFailureIsVisibleAndNotificationIsBounded(t *testing.T) {
 	for _, tc := range []struct{ action, reply string }{
 		{"projects", shown},
 		{"worktree", shown},
+		{"quick-actions", shown},
 		{"worktree", `{"error":{"code":"unavailable","message":"notifications unavailable"}}`},
+		{"quick-actions", `{"error":{"code":"unavailable","message":"notifications unavailable"}}`},
 		{"worktree", ""},
 	} {
 		t.Run(tc.action+tc.reply, func(t *testing.T) {

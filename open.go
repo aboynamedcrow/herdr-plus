@@ -38,6 +38,11 @@ func runOpen(args []string) {
 		errExit(err)
 	}
 
+	cfg, err := loadPluginConfig()
+	if err != nil {
+		errExit(err)
+	}
+
 	// Resolve the requested name to a single project (or a helpful error).
 	p, err := findProject(projects, name)
 	if err != nil {
@@ -50,8 +55,11 @@ func runOpen(args []string) {
 		errExit(err)
 	}
 
-	// Build the live workspace via the shared picker code path.
-	if err := openProject(client, p); err != nil {
+	// Build the live workspace via the shared picker code path. Reuse honors the
+	// same [projects].reuse_checkout policy, with no chooser: a headless caller
+	// has nobody to ask, so several matching workspaces is an error rather than a
+	// guess (openProject names them so the caller can pick one deliberately).
+	if err := openProject(client, p, reuseOptions{enabled: cfg.Projects.ReuseCheckout}); err != nil {
 		errExit("could not open project:", err)
 	}
 

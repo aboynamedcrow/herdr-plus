@@ -40,6 +40,21 @@ type ProjectPane struct {
 	Label      string  `toml:"label"`
 	Ratio      float64 `toml:"ratio"`
 	WorkingDir string  `toml:"working_dir"`
+
+	// SplitFrom names which earlier pane in the same tab this one is split off,
+	// as a 1-based index into the tab's panes. Omitting it (zero) keeps the
+	// original behavior: each pane splits the one created immediately before it.
+	//
+	// It exists because a chain of previous-pane splits cannot express a layout
+	// where one pane stays full height while others stack beside it: to keep an
+	// edge pane whole, the panes in the middle have to be split off each other,
+	// not off the edge. Naming the target directly makes creation order
+	// independent of the arrangement you want.
+	//
+	// The first pane of a tab is its root and splits nothing, so it must leave
+	// this zero; a value that is not an earlier pane is rejected at config load
+	// (see validateTabs), before any workspace exists.
+	SplitFrom int `toml:"split_from"`
 }
 
 // splitRatio translates the pane's authored ratio — the share of the split it
@@ -88,6 +103,7 @@ func (t ProjectTab) effectivePanes() []ProjectPane {
 		if i == 0 {
 			panes[i].Split = ""
 			panes[i].Ratio = 0
+			panes[i].SplitFrom = 0
 			continue
 		}
 		if panes[i].Split == "" {
@@ -227,6 +243,9 @@ func validateTabs(label, source string, tabs []ProjectTab) error {
 			return fmt.Errorf("%q (%s): tab %q has %d panes; at most %d are allowed", label, source, t.Name, len(t.Panes), maxPanesPerTab)
 		}
 		for j, pane := range t.Panes {
+			if _, err := splitTargetIndex(j, pane); err != nil {
+				return fmt.Errorf("%q (%s): tab %q %w", label, source, t.Name, err)
+			}
 			if j == 0 {
 				continue // the first pane is the tab's root; its split is ignored
 			}
@@ -245,6 +264,31 @@ func validateTabs(label, source string, tabs []ProjectTab) error {
 		}
 	}
 	return nil
+}
+
+// splitTargetIndex resolves which pane a pane is split off, returning the 0-based
+// index of that earlier pane. j is the pane's own 0-based index within its tab.
+// The tab's first pane splits nothing and returns -1.
+//
+// It is the single definition of the split_from rule, used both by validateTabs
+// (so a bad target is a config error, caught before anything is created) and by
+// layoutTabs (so the executor resolves targets the same way it validated them).
+func splitTargetIndex(j int, p ProjectPane) (int, error) {
+	if j == 0 {
+		if p.SplitFrom != 0 {
+			return -1, fmt.Errorf("pane 1 is the tab's root and splits nothing; remove its split_from = %d", p.SplitFrom)
+		}
+		return -1, nil
+	}
+	if p.SplitFrom == 0 {
+		// Nothing declared: split the pane created immediately before this one,
+		// exactly as every layout did before split_from existed.
+		return j - 1, nil
+	}
+	if p.SplitFrom < 0 || p.SplitFrom > j {
+		return -1, fmt.Errorf("pane %d has split_from = %d; it must name an earlier pane in the same tab (1 to %d)", j+1, p.SplitFrom, j)
+	}
+	return p.SplitFrom - 1, nil
 }
 
 // promptDirSentinel is the working_dir value that makes a project ask for its

@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 )
@@ -394,8 +395,10 @@ func (c *herdrClient) focusedPaneID() (string, error) {
 // workspace. The worktree handler uses it as an idempotency guard: a freshly
 // created or opened worktree workspace has exactly one (root) pane, so a count
 // above one means the layout was already applied — and we should not apply it
-// again. On any socket error it returns 0 so the caller fails open (proceeds) and
-// degrades to the old, unguarded behavior rather than skipping wrongly.
+// again. A socket failure returns the error (with a zero count), and the handler
+// refuses to lay out on either an error or a zero count: neither can establish
+// that the workspace is fresh, and laying tabs into work that is already there
+// would be worse than doing nothing visibly.
 func (c *herdrClient) workspacePaneCount(workspaceID string) (int, error) {
 	var out struct {
 		Panes []struct {
@@ -426,8 +429,10 @@ func (c *herdrClient) paneGet(paneID string) (paneInfo, error) {
 
 // tabInfo is the subset of herdr's tab metadata herdr-plus uses.
 type tabInfo struct {
-	TabID string `json:"tab_id"`
-	Label string `json:"label"`
+	TabID       string `json:"tab_id"`
+	WorkspaceID string `json:"workspace_id"`
+	Label       string `json:"label"`
+	Focused     bool   `json:"focused"`
 }
 
 // tabGet fetches metadata for a single tab, notably its human label.
@@ -439,10 +444,60 @@ func (c *herdrClient) tabGet(tabID string) (tabInfo, error) {
 	return out.Tab, err
 }
 
+// tabList returns the tabs of one workspace, in herdr's own order. It is how the
+// Projects action finds the task tab to return to: labels are read from live
+// native metadata rather than remembered, so a tab the user renamed or closed is
+// seen as it is now.
+// A missing or null tabs array is an error for the same reason workspaceList
+// rejects one: the caller reads an empty list as "that tab is not there", which
+// reports a renamed or closed tab to the user. A present, empty array is a
+// legitimate answer.
+func (c *herdrClient) tabList(workspaceID string) ([]tabInfo, error) {
+	var out struct {
+		Tabs *[]tabInfo `json:"tabs"`
+	}
+	if err := c.call("tab.list", map[string]any{"workspace_id": workspaceID}, &out); err != nil {
+		return nil, err
+	}
+	if out.Tabs == nil {
+		return nil, errors.New("malformed tab.list result: no tabs array")
+	}
+	for i, t := range *out.Tabs {
+		if strings.TrimSpace(t.TabID) == "" {
+			return nil, fmt.Errorf("malformed tab.list result: tab %d has no tab_id", i+1)
+		}
+	}
+	return *out.Tabs, nil
+}
+
+// tabFocus brings an existing tab to the front. It changes focus only: no pane
+// is created, resized, relaid or written to, so returning to a tab leaves
+// whatever is running in it exactly as it was.
+func (c *herdrClient) tabFocus(tabID string) error {
+	return c.call("tab.focus", map[string]any{"tab_id": tabID}, nil)
+}
+
+// worktreeProvenance is the checkout herdr records for a workspace: which
+// repository it belongs to and, crucially, which checkout of it. CheckoutPath is
+// the only identity herdr-plus matches on — RepoKey is shared by every worktree
+// of a repository, so two sibling worktrees would collide under it, and a Label
+// is a display string the user can change.
+type worktreeProvenance struct {
+	RepoKey          string `json:"repo_key"`
+	RepoName         string `json:"repo_name"`
+	RepoRoot         string `json:"repo_root"`
+	CheckoutPath     string `json:"checkout_path"`
+	IsLinkedWorktree bool   `json:"is_linked_worktree"`
+}
+
 // workspaceInfo is the subset of herdr's workspace metadata herdr-plus uses.
+// Worktree is nil for a workspace herdr has no checkout provenance for (a plain
+// folder), which is never treated as a match for anything.
 type workspaceInfo struct {
-	WorkspaceID string `json:"workspace_id"`
-	Label       string `json:"label"`
+	WorkspaceID string              `json:"workspace_id"`
+	Label       string              `json:"label"`
+	Focused     bool                `json:"focused"`
+	Worktree    *worktreeProvenance `json:"worktree"`
 }
 
 // workspaceGet fetches metadata for a single workspace, notably its label —
@@ -453,6 +508,52 @@ func (c *herdrClient) workspaceGet(workspaceID string) (workspaceInfo, error) {
 	}
 	err := c.call("workspace.get", map[string]any{"workspace_id": workspaceID}, &out)
 	return out.Workspace, err
+}
+
+// workspaceList returns every open workspace with the checkout provenance herdr
+// holds for it. It is the inventory the "is this project already open?" question
+// is answered from — herdr's own record of what each workspace checks out, not a
+// registry herdr-plus keeps for itself.
+//
+// A successful but malformed reply is an error, never an empty inventory. The
+// difference matters: the caller reads "no workspaces" as "nothing is open yet"
+// and creates one, so a missing or null array — which plain decoding would hand
+// back as an empty slice — would quietly produce the duplicate workspace the
+// whole feature exists to prevent. An array that is present and genuinely empty
+// is fine, and means what it says.
+func (c *herdrClient) workspaceList() ([]workspaceInfo, error) {
+	var out struct {
+		// A pointer distinguishes "herdr sent an empty list" from "herdr sent no
+		// list at all"; both decode to a nil slice otherwise.
+		Workspaces *[]workspaceInfo `json:"workspaces"`
+	}
+	if err := c.call("workspace.list", map[string]any{}, &out); err != nil {
+		return nil, err
+	}
+	if out.Workspaces == nil {
+		return nil, errors.New("malformed workspace.list result: no workspaces array")
+	}
+	for i, ws := range *out.Workspaces {
+		if strings.TrimSpace(ws.WorkspaceID) == "" {
+			return nil, fmt.Errorf("malformed workspace.list result: workspace %d has no workspace_id", i+1)
+		}
+		// Provenance is optional (a plain folder has none), but a provenance block
+		// that is present has to be usable as identity — an absolute checkout path.
+		// Anything else cannot be compared, and must not be silently skipped over.
+		if ws.Worktree == nil {
+			continue
+		}
+		if path := strings.TrimSpace(ws.Worktree.CheckoutPath); path == "" || !filepath.IsAbs(path) {
+			return nil, fmt.Errorf("malformed workspace.list result: workspace %s reports checkout path %q, which is not an absolute path", ws.WorkspaceID, ws.Worktree.CheckoutPath)
+		}
+	}
+	return *out.Workspaces, nil
+}
+
+// workspaceFocus switches to an existing workspace. Like tabFocus it only moves
+// focus: the workspace's tabs, panes and running processes are untouched.
+func (c *herdrClient) workspaceFocus(workspaceID string) error {
+	return c.call("workspace.focus", map[string]any{"workspace_id": workspaceID}, nil)
 }
 
 // workspaceCreate makes a brand-new workspace rooted at cwd with the given

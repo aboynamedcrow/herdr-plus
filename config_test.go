@@ -141,3 +141,46 @@ func TestResolvePlacement(t *testing.T) {
 		})
 	}
 }
+
+// TestLoadPluginConfigParsesCrewPolicy covers the two opt-in [projects] keys the
+// contextual-Projects behavior reads: crew_tab (the task tab label P returns to)
+// and reuse_checkout (reuse an already-open checkout instead of creating a second
+// workspace). Both are optional, so an absent file must leave the upstream
+// picker-only, always-create behavior in place — no baked-in Crew name.
+func TestLoadPluginConfigParsesCrewPolicy(t *testing.T) {
+	t.Run("absent config leaves both off", func(t *testing.T) {
+		t.Setenv("HERDR_PLUGIN_CONFIG_DIR", t.TempDir())
+		cfg, err := loadPluginConfig()
+		if err != nil {
+			t.Fatalf("loadPluginConfig: %v", err)
+		}
+		if cfg.Projects.CrewTab != "" {
+			t.Fatalf("Projects.CrewTab = %q, want empty", cfg.Projects.CrewTab)
+		}
+		if cfg.Projects.ReuseCheckout {
+			t.Fatal("Projects.ReuseCheckout = true, want false by default")
+		}
+	})
+
+	t.Run("configured values are read", func(t *testing.T) {
+		dir := t.TempDir()
+		t.Setenv("HERDR_PLUGIN_CONFIG_DIR", dir)
+		toml := "[projects]\nplacement = \"popup\"\ncrew_tab = \"Crew\"\nreuse_checkout = true\n"
+		if err := os.WriteFile(filepath.Join(dir, "config.toml"), []byte(toml), 0o644); err != nil {
+			t.Fatalf("write config: %v", err)
+		}
+		cfg, err := loadPluginConfig()
+		if err != nil {
+			t.Fatalf("loadPluginConfig: %v", err)
+		}
+		if cfg.Projects.CrewTab != "Crew" {
+			t.Fatalf("Projects.CrewTab = %q, want Crew", cfg.Projects.CrewTab)
+		}
+		if !cfg.Projects.ReuseCheckout {
+			t.Fatal("Projects.ReuseCheckout = false, want true")
+		}
+		if cfg.Projects.Placement != "popup" {
+			t.Fatalf("Projects.Placement = %q, want popup (existing keys must keep working)", cfg.Projects.Placement)
+		}
+	})
+}

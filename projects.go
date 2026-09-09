@@ -135,11 +135,15 @@ func runProjectsUI() {
 		errExit(err)
 	}
 	if m.worktree {
-		if len(cfg.Worktree.Projects) > 0 {
-			dir, err := m.chosen.expandedWorkingDir()
-			if err != nil {
-				errExit(err)
-			}
+		dir, err := m.chosen.expandedWorkingDir()
+		if err != nil {
+			errExit(err)
+		}
+		shared, err := projectUsesSharedWorktreePolicy(cfg, dir)
+		if err != nil {
+			errExit(err)
+		}
+		if shared {
 			// The planner takes the raw input. It applies branch_prefix itself, and
 			// only the unprefixed name still matches an existing unprefixed branch —
 			// the case W already reuses without a base query or a fetch.

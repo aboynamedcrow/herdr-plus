@@ -466,15 +466,25 @@ max_tail = 29
 ```
 
 The picker shows the resulting branch and checkout path before applying it.
+Shared policies require a nonempty `branch_prefix` ending in `/` and a
+`max_tail` between 1 and 200 for each project. Legacy worktree creation still
+allows an empty prefix when that repository has no shared policy.
 Existing branches and registered paths are preserved. Issue matches use complete
 identifiers, so `IC-177` cannot select `IC-1770`; multiple matching branches remain
 explicit choices. New descriptions become lowercase kebab case within `max_tail`.
 New checkout directories replace branch slashes with `--` under the configured root.
+When an issue already has matching branches, the picker offers those existing
+branches. To deliberately create an additional branch for the same issue, use
+the explicit `ensure-worktree` command.
 
 New branches use the remote's current default branch, or the configured override.
 Missing or unreadable remote defaults produce an error. Existing branches need
-neither a base query nor a fetch. The primary project must already be open with
-native checkout provenance; applying a selection never creates an implicit parent.
+neither a base query nor a fetch. Plus requires an open primary project with
+verified native checkout provenance before submitting creation to Herdr, and
+addresses that workspace explicitly. Keep the primary open until creation
+finishes: Herdr 0.9 can select or create a replacement parent if it disappears
+during the asynchronous Git operation. Plus does not control that native
+completion behavior or run a second creation attempt.
 
 For external callers, `plan-worktree --cwd /absolute/checkout --name "description"
 --issue IC-177` returns versioned JSON with `candidates` and a `fingerprint`.
@@ -487,7 +497,9 @@ native workspace, pane and checkout fields. Cancelling means never invoking appl
 The W action requires Herdr's explicit invoking-pane context and opens a temporary
 overlay picker. It never chooses a project from another client's current focus.
 `ensure-worktree` also accepts an optional `--workspace` for an explicitly verified
-primary workspace; the older explicit-cwd interface remains available.
+primary workspace. In that mode Plus checks its native repository provenance and
+sends `workspace_id` without `cwd` to native create/open; the older explicit-cwd
+interface remains available.
 
 ## Quick Actions
 

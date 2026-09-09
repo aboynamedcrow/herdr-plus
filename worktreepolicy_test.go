@@ -55,6 +55,59 @@ func TestPolicyPlansRemoteDefaultWithoutMutating(t *testing.T) {
 	}
 }
 
+func TestPolicyExplicitIssueCannotReuseAnUnrelatedExactName(t *testing.T) {
+	for _, name := range []string{"cleanup", "ingwon/ic-1770-other"} {
+		t.Run(name, func(t *testing.T) {
+			repo, _ := policyFixture(t)
+			runGit(t, repo, "branch", name)
+			plan, err := planWorktree(worktreeRequest{Cwd: repo, Name: name, Issue: "IC-177"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(plan.Candidates) != 1 || plan.Candidates[0].Existing || !matchesIssue(plan.Candidates[0].Branch, "IC-177") {
+				t.Fatalf("explicit issue selected an unrelated branch: %+v", plan)
+			}
+			runGit(t, repo, "branch", "team/ic-177-existing")
+			plan, err = planWorktree(worktreeRequest{Cwd: repo, Name: name, Issue: "IC-177"})
+			if err != nil || len(plan.Candidates) != 1 || plan.Candidates[0].Branch != "team/ic-177-existing" {
+				t.Fatalf("whole-issue branch must be the only existing choice: %+v %v", plan, err)
+			}
+		})
+	}
+}
+
+func TestPolicyProjectsRouteBySelectedRepository(t *testing.T) {
+	repo, _ := policyFixture(t)
+	linked := addWorktree(t, repo, "linked")
+	other := newGitRepo(t)
+	bare := t.TempDir()
+	runGit(t, bare, "init", "--bare")
+	cfg, err := loadPluginConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, item := range []struct {
+		cwd    string
+		shared bool
+	}{{repo, true}, {linked, true}, {other, false}, {bare, false}} {
+		shared, err := projectUsesSharedWorktreePolicy(cfg, item.cwd)
+		if err != nil || shared != item.shared {
+			t.Fatalf("route for %s = %v, %v; want shared=%v", item.cwd, shared, err, item.shared)
+		}
+	}
+	duplicate := cfg
+	duplicate.Worktree.Projects = append(append([]WorktreePolicy{}, cfg.Worktree.Projects...), cfg.Worktree.Projects[0])
+	if shared, err := projectUsesSharedWorktreePolicy(duplicate, repo); err == nil || shared {
+		t.Fatal("duplicate policy must refuse, not choose a route")
+	}
+	malformed := cfg
+	malformed.Worktree.Projects = append([]WorktreePolicy{}, cfg.Worktree.Projects...)
+	malformed.Worktree.Projects[0].Root = ""
+	if shared, err := projectUsesSharedWorktreePolicy(malformed, repo); err == nil || shared {
+		t.Fatal("malformed matching policy must not fall back to legacy")
+	}
+}
+
 func TestPolicyPreservesWholeIssueCandidatesAndOldPaths(t *testing.T) {
 	repo, origin := policyFixture(t)
 	old := addWorktree(t, repo, "old/IC-177-original")

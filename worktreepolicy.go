@@ -185,6 +185,8 @@ func canonicalDestination(path string) (string, error) {
 	}
 }
 
+var errNoWorktreePolicy = errors.New("no configured worktree policy")
+
 func policyForCheckout(cfg PluginConfig, primary string) (WorktreePolicy, error) {
 	var matches []WorktreePolicy
 	for _, policy := range cfg.Worktree.Projects {
@@ -220,10 +222,45 @@ func policyForCheckout(cfg PluginConfig, primary string) (WorktreePolicy, error)
 		}
 		matches = append(matches, policy)
 	}
+	if len(matches) == 0 {
+		return WorktreePolicy{}, fmt.Errorf("expected one worktree policy for %s, found 0: %w", primary, errNoWorktreePolicy)
+	}
 	if len(matches) != 1 {
 		return WorktreePolicy{}, fmt.Errorf("expected one worktree policy for %s, found %d", primary, len(matches))
 	}
 	return matches[0], nil
+}
+
+// Projects retains its legacy path only when this repository has no policy.
+// Invalid or ambiguous configuration must not silently select another route.
+func projectUsesSharedWorktreePolicy(cfg PluginConfig, cwd string) (bool, error) {
+	if len(cfg.Worktree.Projects) == 0 {
+		return false, nil
+	}
+	canonical, err := canonicalPath(cwd)
+	if err != nil {
+		return false, err
+	}
+	listing, err := ensureGit(canonical, 10*time.Second, "worktree", "list", "--porcelain", "-z")
+	if err != nil {
+		return false, err
+	}
+	records, err := parseGitWorktreeList(canonical, listing)
+	if err != nil {
+		return false, err
+	}
+	if len(records) == 0 {
+		return false, errors.New("project has no primary Git checkout")
+	}
+	primary, err := canonicalPath(records[0].Path)
+	if err != nil {
+		return false, err
+	}
+	_, err = policyForCheckout(cfg, primary)
+	if errors.Is(err, errNoWorktreePolicy) {
+		return false, nil
+	}
+	return err == nil, err
 }
 
 // Resolve against the remote itself. A stale local origin/HEAD is not evidence of
@@ -363,7 +400,10 @@ func planWorktree(req worktreeRequest) (worktreePlan, error) {
 	}
 	plan = worktreePlan{Version: 1, Project: policy.Name, Repository: primary, Issue: strings.ToUpper(req.Issue), Candidates: []worktreeChoice{}}
 	for name := range heads {
-		if name != branch && name != req.Name && !matchesIssue(name, req.Issue) {
+		if req.Issue != "" && !matchesIssue(name, req.Issue) {
+			continue
+		}
+		if req.Issue == "" && name != branch && name != req.Name {
 			continue
 		}
 		path, checkedOut := paths[name]

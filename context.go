@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 )
 
@@ -137,11 +138,66 @@ func pluginContextFromEnv() (pluginContext, error) {
 	return pc, nil
 }
 
+// verifyInvokingPane proves that the pane herdr named as the action's invoker is
+// still that pane, in that workspace, in that directory.
+//
+// A plugin action runs server-side with no terminal of its own, and global focus
+// belongs to whichever client moved it last. So the pane named in the action
+// context is the only safe thing to place an overlay over and the only
+// trustworthy working directory: anything read from live focus could belong to
+// another client's window by the time the picker opens. An incomplete context,
+// or a pane that has since moved, is reported rather than guessed around.
+//
+// action names the caller for the diagnostic; the checks are identical for
+// every action that uses it.
+func verifyInvokingPane(client *herdrClient, pc pluginContext, action string) (paneInfo, error) {
+	if pc.WorkspaceID == "" || pc.FocusedPaneID == "" || !filepath.IsAbs(pc.FocusedPaneCwd) {
+		return paneInfo{}, fmt.Errorf("%s action needs an explicit invoking workspace, pane and directory", action)
+	}
+	pane, err := client.paneGet(pc.FocusedPaneID)
+	if err != nil {
+		return paneInfo{}, err
+	}
+	if pane.PaneID != pc.FocusedPaneID || pane.WorkspaceID != pc.WorkspaceID || !samePath(firstNonEmpty(pane.ForegroundCwd, pane.Cwd), pc.FocusedPaneCwd) {
+		return paneInfo{}, fmt.Errorf("invoking pane changed; invoke the %s action again", action)
+	}
+	return pane, nil
+}
+
+// quickActionsInvocation is contextFromPluginEnv with the invoking pane proven
+// first. Quick Actions places its picker over that pane and runs the chosen
+// command in its directory, so an unverified context is both a placement and a
+// working directory this plugin cannot stand behind.
+//
+// Every field herdr supplied is still carried through: the picker and the
+// actions it runs see the same tab and workspace labels, agent, and — because
+// the guard requires the focused pane's own absolute cwd — the same working
+// directory contextFromPluginEnv would have produced for any launch that this
+// guard admits.
+func quickActionsInvocation(client *herdrClient, pc pluginContext) (RunContext, error) {
+	if _, err := verifyInvokingPane(client, pc, "quick actions"); err != nil {
+		return RunContext{}, err
+	}
+	return RunContext{
+		WorkDir:        pc.FocusedPaneCwd,
+		PaneId:         pc.FocusedPaneID,
+		TabId:          pc.TabID,
+		TabLabel:       pc.TabLabel,
+		WorkspaceId:    pc.WorkspaceID,
+		WorkspaceLabel: pc.WorkspaceLabel,
+		Agent:          pc.FocusedPaneAgent,
+	}, nil
+}
+
 // contextFromPluginEnv builds a RunContext from HERDR_PLUGIN_CONTEXT_JSON, which
-// herdr sets when it runs the quick-actions action. The working directory is the
-// focused pane's cwd (the user's real directory), falling back to the workspace
-// cwd. Any field herdr does not supply is left empty — a partial context is far
-// better than refusing to launch.
+// herdr sets when it runs a plugin action. The working directory is the focused
+// pane's cwd (the user's real directory), falling back to the workspace cwd. Any
+// field herdr does not supply is left empty — a partial context is far better
+// than refusing to launch.
+//
+// It is the unverified reading, used where no pane is placed over and nothing is
+// run in that directory. Quick Actions does both, and uses
+// quickActionsInvocation instead.
 func contextFromPluginEnv() RunContext {
 	// A malformed context is deliberately ignored here: a quick action would
 	// rather launch with no metadata than refuse to open. The Projects action

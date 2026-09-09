@@ -107,8 +107,14 @@ type projectsModel struct {
 	branchInput  textinput.Model
 	branchPrefix string
 	worktree     bool
-	branch       string
-	quitting     bool
+	// branch is the name the legacy herdr-native worktree path uses: the typed
+	// input with branch_prefix already applied. rawBranch is the input exactly as
+	// typed, which is what the shared planner needs — it does its own prefixing,
+	// and only the unprefixed name can still match an existing branch that has no
+	// prefix. Prefixing before the planner sees it loses that branch.
+	branch    string
+	rawBranch string
+	quitting  bool
 
 	// Path-prompt state for projects with working_dir = "{prompt}": the input,
 	// the last validation error, and whether the worktree branch prompt should
@@ -327,13 +333,14 @@ func (m projectsModel) updateBranch(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 			m.worktree = true
+			m.rawBranch = strings.TrimSpace(m.branchInput.Value())
 			m.branch = resolveWorktreeBranch(m.branchInput.Value(), m.branchPrefix)
 			return m, tea.Quit
 		case "esc":
 			m.mode = modeList
 			m.chosen = nil
 			m.worktree = false
-			m.branch = ""
+			m.branch, m.rawBranch = "", ""
 			return m, nil
 		}
 
@@ -388,7 +395,7 @@ func (m projectsModel) promptWorktreeBranch() (tea.Model, tea.Cmd) {
 // continue-to-branch step, so both arrive with a clean input.
 func (m projectsModel) enterBranchMode() (tea.Model, tea.Cmd) {
 	m.worktree = false
-	m.branch = ""
+	m.branch, m.rawBranch = "", ""
 	m.branchInput.SetValue("")
 	m.branchInput.Prompt = ""
 	m.branchInput.Placeholder = "empty → generated name"

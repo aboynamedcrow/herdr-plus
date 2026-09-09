@@ -11,7 +11,7 @@ herdr-plus is an add-on for [herdr](https://herdr.dev), built as a first-class
 
 ## Install
 
-herdr-plus is a herdr plugin (requires **herdr ≥ 0.7.0**). Installing it registers
+herdr-plus is a herdr plugin (requires **herdr ≥ 0.9.0**). Installing it registers
 the plugin's actions with herdr — no editing of your `config.toml`.
 
 ```bash
@@ -106,8 +106,12 @@ tab instead of opening the browser — see
 [Returning to work you already have open](#returning-to-work-you-already-have-open).)
 Inside the browser, **Enter** opens the highlighted project as a normal workspace;
 **ctrl+g** opens it as a git worktree. The worktree prompt accepts an optional
-branch name: empty lets herdr generate `worktree/...`, bare names get the optional
-`[worktree] branch_prefix`, and names containing `/` are used as-is.
+branch name. Without a [shared worktree policy](#shared-worktree-policy)
+configured, empty lets herdr generate `worktree/...`, bare names get the optional
+`[worktree] branch_prefix`, and names containing `/` are used as-is. With a
+policy configured for the project's repository, the name goes to the shared
+planner exactly as typed — it applies `branch_prefix` itself, and shows the
+branch and checkout path for confirmation before anything is created.
 
 Opening as a worktree fills its tabs from a matching
 [worktree auto-layout](#worktree-auto-layout) — a file in `worktrees/` whose `repo`
@@ -426,8 +430,9 @@ Binding has these limits:
   checkout, which is what herdr requires. Open the primary-checkout project
   first. Otherwise this plugin refuses before creating anything: native grouping
   would create an empty parent that could later shadow the primary project's
-  configured layout. Binding names the verified parent workspace explicitly, so
-  closing it during the operation produces an error, not another parent.
+  configured layout. Binding names the verified parent workspace explicitly.
+  Keep it open until completion: Herdr 0.9 may recreate a parent closed while
+  its asynchronous Git operation is running.
 - If herdr reports an open workspace in your project's checkout but it carries no
   provenance (including a scratch workspace whose shell entered that checkout), the open is
   **refused** with a message naming it. Nothing is created and nothing is
@@ -444,11 +449,73 @@ so this applies to projects whose `working_dir` is a git checkout root. A projec
 pointing at a plain (non-git) directory, or at a *subdirectory* of a checkout,
 has no such provenance and keeps the old behavior — a new workspace every time.
 
+## Shared worktree policy
+
+The optional `worktree` action and Projects' Ctrl+G share a planner with external
+callers such as an issue picker. Configure one policy per primary repository:
+
+```toml
+[worktree]
+branch_prefix = "your-name/"
+
+[[worktree.projects]]
+name = "project"
+repository = "~/code/project"
+root = "~/code/worktrees/project"
+max_tail = 29
+# base = "develop" # optional remote branch override
+```
+
+The picker shows the resulting branch and checkout path before applying it.
+Shared policies require a nonempty `branch_prefix` ending in `/` and a
+`max_tail` between 1 and 200 for each project. Legacy worktree creation still
+allows an empty prefix when that repository has no shared policy.
+Existing branches and registered paths are preserved. Issue matches use complete
+identifiers, so `IC-177` cannot select `IC-1770`; multiple matching branches remain
+explicit choices. New descriptions become lowercase kebab case within `max_tail`.
+New checkout directories replace branch slashes with `--` under the configured root.
+When an issue already has matching branches, the picker offers those existing
+branches. To deliberately create an additional branch for the same issue, use
+the explicit `ensure-worktree` command.
+
+New branches use the remote's current default branch, or the configured override.
+Missing or unreadable remote defaults produce an error. Existing branches need
+neither a base query nor a fetch. Plus requires an open primary project with
+verified native checkout provenance before submitting creation to Herdr, and
+addresses that workspace explicitly. Keep the primary open until creation
+finishes: Herdr 0.9 can select or create a replacement parent if it disappears
+during the asynchronous Git operation. Plus does not control that native
+completion behavior or run a second creation attempt.
+
+Plus rechecks branch presence and checkout registration after preparation, just
+before submission. Herdr 0.9 does not atomically reserve that Git state: another
+actor creating the same branch during native execution can cause Herdr to reuse
+that branch instead of the supplied base commit. Avoid concurrent creation of the
+same branch until the operation finishes; Plus never resets it or retries.
+
+For external callers, `plan-worktree --cwd /absolute/checkout --name "description"
+--issue IC-177` returns versioned JSON with `candidates` and a `fingerprint`.
+Planning reads Git and remote metadata without creating directories, fetching, or
+changing branches. Pass the same inputs plus `--candidate <id> --fingerprint <hash>`
+to `apply-worktree`. It rebuilds the plan, refuses stale or absent selections, and
+delegates native creation/opening to `ensure-worktree`. Its `result` preserves the
+native workspace, pane and checkout fields. Cancelling means never invoking apply.
+
+The W action requires Herdr's explicit invoking-pane context and opens a temporary
+overlay picker. It never chooses a project from another client's current focus.
+`ensure-worktree` also accepts an optional `--workspace` for an explicitly verified
+primary workspace. In that mode Plus checks its native repository provenance and
+sends `workspace_id` without `cwd` to native create/open; the older explicit-cwd
+interface remains available.
+
 ## Quick Actions
 
 A fuzzy launcher for one-off commands. Trigger it (action
 `cloudmanic.herdr-plus.quick-actions`), fuzzy-pick an action, and it runs in the
-directory you launched from. Actions are TOML files in the `quick-actions/` subdir
+directory you launched from. The picker opens over the pane the action fired
+from — verified against herdr, not read from live focus, so another client
+moving focus cannot land it somewhere else — and an invoking pane that cannot be
+established is reported as a notification instead of opening a picker. Actions are TOML files in the `quick-actions/` subdir
 of [herdr-plus's config dir](#configuration) (seeded with editable examples on
 first run). A repo can also ship its own in `<repo>/.herdr-plus/quick-actions/`, shown
 under a **Project** heading above your **Global** ones — this repo ships
@@ -622,3 +689,5 @@ make vet       # go vet ./...
 
 The marketing + docs site lives in `www/` (Hugo + Tailwind). Build it with
 `make site`, or run it locally with live reload via `make site-dev`.
+
+Projects and Worktree action failures appear as a Herdr notification and in the plugin log. Notification delivery is best effort when the server is unavailable or notifications are suppressed. This fork requires Herdr 0.9.0 or newer.

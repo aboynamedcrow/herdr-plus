@@ -208,7 +208,37 @@ func (f *fakeHerdr) refuseWorktreeList() {
 
 // wsInfo builds one workspace.list / workspace.get entry with checkout
 // provenance, the way herdr reports a workspace opened on a git checkout.
+//
+// repo_root and repo_key follow the real 0.9.0 shapes rather than placeholders.
+// herdr builds a membership from the source's repo root, so a workspace on a
+// primary checkout reports repo_root == checkout_path and only a linked one
+// reports a different root; and git_space_metadata_from_info derives repo_key
+// as the canonical Git common directory, which for an ordinary checkout is its
+// own .git. Fixtures that said "/repo" and "repo-key" modelled provenance no
+// real herdr sends, and made a contradictory record look like the normal case.
 func wsInfo(id, label, checkout string, linked bool) map[string]any {
+	repoRoot := checkout
+	if linked {
+		repoRoot = "/repo"
+	}
+	return wsInfoWithProvenance(id, label, checkout, repoRoot, filepath.Join(repoRoot, ".git"), linked)
+}
+
+// wsInfoWithProvenance is wsInfo with the repository root and key stated
+// explicitly, for the cases that need a record herdr would not send. An empty
+// repoRoot or repoKey omits that field entirely.
+func wsInfoWithProvenance(id, label, checkout, repoRoot, repoKey string, linked bool) map[string]any {
+	worktree := map[string]any{
+		"repo_name":          "repo",
+		"checkout_path":      checkout,
+		"is_linked_worktree": linked,
+	}
+	if repoRoot != "" {
+		worktree["repo_root"] = repoRoot
+	}
+	if repoKey != "" {
+		worktree["repo_key"] = repoKey
+	}
 	return map[string]any{
 		"workspace_id": id,
 		"number":       1,
@@ -216,13 +246,7 @@ func wsInfo(id, label, checkout string, linked bool) map[string]any {
 		"focused":      false,
 		"pane_count":   1,
 		"tab_count":    1,
-		"worktree": map[string]any{
-			"repo_key":           "repo-key",
-			"repo_name":          "repo",
-			"repo_root":          "/repo",
-			"checkout_path":      checkout,
-			"is_linked_worktree": linked,
-		},
+		"worktree":     worktree,
 	}
 }
 

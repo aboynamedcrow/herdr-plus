@@ -502,7 +502,10 @@ delegates native creation/opening to `ensure-worktree`. Its `result` preserves t
 native workspace, pane and checkout fields. Cancelling means never invoking apply.
 
 The W action requires Herdr's explicit invoking-pane context and opens a temporary
-overlay picker. It never chooses a project from another client's current focus.
+overlay picker. It never chooses a project from another client's current focus: the
+checkout it plans against is the verified invoking pane's, and an invoking pane that
+has moved refuses the launch. Herdr places an overlay over the active pane itself, so
+that part is native's choice, not this plugin's.
 `ensure-worktree` also accepts an optional `--workspace` for an explicitly verified
 primary workspace. In that mode Plus checks its native repository provenance and
 sends `workspace_id` without `cwd` to native create/open; the older explicit-cwd
@@ -512,10 +515,14 @@ interface remains available.
 
 A fuzzy launcher for one-off commands. Trigger it (action
 `cloudmanic.herdr-plus.quick-actions`), fuzzy-pick an action, and it runs in the
-directory you launched from. The picker opens over the pane the action fired
-from — verified against herdr, not read from live focus, so another client
-moving focus cannot land it somewhere else — and an invoking pane that cannot be
-established is reported as a notification instead of opening a picker. Actions are TOML files in the `quick-actions/` subdir
+directory you launched from. That directory is the pane the action fired from,
+verified against herdr rather than read from live focus, so another client
+moving focus cannot make the picker run commands somewhere else; an invoking
+pane that cannot be established is reported as a notification instead of
+opening a picker. Where the picker is *drawn* follows the placement: a `split`,
+`tab` or `zoomed` picker is opened over that same verified pane, while
+`overlay` and `popup` cover whichever pane is active, because Herdr 0.9 places
+those itself and refuses an explicit target pane for them. Actions are TOML files in the `quick-actions/` subdir
 of [herdr-plus's config dir](#configuration) (seeded with editable examples on
 first run). A repo can also ship its own in `<repo>/.herdr-plus/quick-actions/`, shown
 under a **Project** heading above your **Global** ones — this repo ships

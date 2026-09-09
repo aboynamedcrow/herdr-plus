@@ -36,6 +36,31 @@ var validPanePlacements = map[string]bool{
 	"zoomed":  true,
 }
 
+// placementAcceptsTargetPane reports whether herdr allows an explicit
+// --target-pane with this placement.
+//
+// Verified against installed herdr 0.9.0: an overlay or popup plugin pane is
+// placed over whichever pane is active, and naming one explicitly is refused
+// outright — `invalid_params: overlay and popup plugin panes target the active
+// pane`, with no pane created. The API schema carries target_pane_id as a
+// top-level field, which reads as placement-independent; the server disagrees,
+// and the server decides. So the flag goes only where it is honored.
+//
+// Losing it costs less than it looks. The launch path proves the invoking pane
+// before opening anything (verifyInvokingPane), so a pane that moved, changed
+// workspace or changed directory still refuses instead of opening somewhere
+// wrong; what remains is that native, not this plugin, chooses which pane an
+// overlay covers. For a full-screen overlay or a centered popup that is the
+// documented native behavior rather than a placement this plugin could pin.
+func placementAcceptsTargetPane(placement string) bool {
+	switch placement {
+	case "overlay", "popup":
+		return false
+	default:
+		return true
+	}
+}
+
 // PluginConfig holds herdr-plus's optional global settings, read from config.toml
 // at the config root (alongside projects/ and quick-actions/). Every field is
 // optional; an absent file yields the zero value.

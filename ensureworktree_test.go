@@ -19,7 +19,8 @@ import (
 )
 
 // This suite runs the built CLI with real disposable Git repositories. Only
-// fetch and deliberately broken Git queries are replaced; IPC is a local fake.
+// deliberately broken Git queries and most fetches are replaced; one bounded
+// fixture fetches a temporary file origin. IPC is always a local fake.
 // Neither the user's Git configuration nor a live Herdr endpoint is inherited.
 func TestEnsureWorktree(t *testing.T) {
 	if runtime.GOOS == "windows" {
@@ -112,10 +113,10 @@ func TestEnsureWorktree(t *testing.T) {
 				}
 				f.assertCalls(method, want)
 				log := f.log()
-				if strings.Contains(log, "fetch origin main\n") != fetch {
+				if strings.Contains(log, "fetch origin refs/heads/main:refs/remotes/origin/main\n") != fetch {
 					t.Fatalf("fetch selection: %q", log)
 				}
-				if fetch && !strings.Contains(log, "fetch origin main\nNATIVE worktree.create\n") {
+				if fetch && !strings.Contains(log, "fetch origin refs/heads/main:refs/remotes/origin/main\nNATIVE worktree.create\n") {
 					t.Fatalf("fetch must precede native call: %q", log)
 				}
 				if after := f.git("show-ref", "--heads"); after != before {
@@ -125,6 +126,162 @@ func TestEnsureWorktree(t *testing.T) {
 					t.Fatalf("Plus created target directly: %v", err)
 				}
 			})
+		}
+	})
+
+	t.Run("cwd overrides inherited repository selectors", func(t *testing.T) {
+		for _, selectors := range []string{"directory and worktree", "common directory", "config count", "config parameters"} {
+			t.Run(selectors, func(t *testing.T) {
+				a, b := newEnsureFixture(t, bin), newEnsureFixture(t, bin)
+				oldPath := filepath.Join(a.dir, "registered in A")
+				a.git("worktree", "add", "-b", "feature/a", oldPath)
+				b.git("worktree", "add", "-b", "feature/a", filepath.Join(b.dir, "registered in B"))
+				a.cliEnv = []string{"GIT_DIR=" + filepath.Join(b.repo, ".git"), "GIT_WORK_TREE=" + b.repo}
+				if selectors == "common directory" {
+					a.cliEnv = []string{"GIT_COMMON_DIR=" + filepath.Join(b.repo, ".git")}
+				}
+				if selectors == "config count" {
+					a.cliEnv = []string{"GIT_CONFIG_COUNT=1", "GIT_CONFIG_KEY_0=core.worktree", "GIT_CONFIG_VALUE_0=" + b.repo}
+				}
+				if selectors == "config parameters" {
+					a.cliEnv = []string{"GIT_CONFIG_PARAMETERS='core.worktree=" + b.repo + "'"}
+				}
+				if strings.HasPrefix(selectors, "config ") {
+					// Verify that Git actually received the override; a benign or
+					// ineffective test environment would leave the doubt unresolved.
+					cmd := exec.Command(a.realGit, "config", "--get", "core.worktree")
+					cmd.Dir, cmd.Env = a.repo, append(a.env(), a.cliEnv...)
+					out, err := cmd.CombinedOutput()
+					if err != nil || strings.TrimSpace(string(out)) != b.repo {
+						t.Fatalf("injected config missing: out=%q err=%v", out, err)
+					}
+					cmd = exec.Command(a.realGit, "rev-parse", "--show-toplevel")
+					cmd.Dir, cmd.Env = a.repo, append(a.env(), a.cliEnv...)
+					out, err = cmd.CombinedOutput()
+					t.Logf("unfiltered Git root=%q err=%v; explicit A=%q", out, err, a.repo)
+				}
+				a.reply = map[string]any{"id": "herdr-plus", "result": ensureResult(oldPath)}
+				stdout, stderr, err := a.run("--cwd", a.repo, "--branch", "feature/a")
+				if err != nil {
+					t.Fatalf("explicit A must succeed: %v stdout=%q stderr=%q", err, stdout, stderr)
+				}
+				a.assertCalls("worktree.open", map[string]any{"cwd": a.repo, "branch": "feature/a", "focus": false})
+				if strings.Contains(a.log(), "fetch ") {
+					t.Fatal("registered branch fetched")
+				}
+			})
+		}
+	})
+
+	t.Run("Git paths ignore inherited selectors", func(t *testing.T) {
+		for _, tc := range []struct{ variable, path string }{
+			{"GIT_INDEX_FILE", "index"},
+			{"GIT_OBJECT_DIRECTORY", "objects"},
+			{"GIT_GRAFT_FILE", "info/grafts"},
+		} {
+			t.Run(tc.variable, func(t *testing.T) {
+				f := newEnsureFixture(t, bin)
+				t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
+				t.Setenv("GIT_CONFIG_GLOBAL", os.DevNull)
+				t.Setenv(tc.variable, filepath.Join(f.dir, "foreign"))
+				out, err := ensureGit(f.repo, 10*time.Second, "rev-parse", "--path-format=absolute", "--git-path", tc.path)
+				want := filepath.Join(f.repo, ".git", tc.path)
+				if err != nil || strings.TrimSpace(string(out)) != want {
+					t.Fatalf("Git must use cwd's %s: got=%q err=%v want=%q", tc.path, out, err, want)
+				}
+			})
+		}
+	})
+
+	t.Run("Git object lookup ignores inherited alternates", func(t *testing.T) {
+		a, b := newEnsureFixture(t, bin), newEnsureFixture(t, bin)
+		b.git("-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "--allow-empty", "-m", "only B")
+		oid := strings.TrimSpace(b.git("rev-parse", "HEAD"))
+		t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
+		t.Setenv("GIT_CONFIG_GLOBAL", os.DevNull)
+		t.Setenv("GIT_ALTERNATE_OBJECT_DIRECTORIES", filepath.Join(b.repo, ".git", "objects"))
+		if _, err := ensureGit(a.repo, 10*time.Second, "cat-file", "-e", oid); err == nil {
+			t.Fatal("cwd A unexpectedly sees an object present only in B")
+		}
+	})
+
+	t.Run("Git retains supplied configuration", func(t *testing.T) {
+		f := newEnsureFixture(t, bin)
+		t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
+		t.Setenv("GIT_CONFIG_GLOBAL", os.DevNull)
+		t.Setenv("GIT_CONFIG_COUNT", "1")
+		t.Setenv("GIT_CONFIG_KEY_0", "ensure.fixture")
+		t.Setenv("GIT_CONFIG_VALUE_0", "retained")
+		out, err := ensureGit(f.repo, 10*time.Second, "config", "--get", "ensure.fixture")
+		if err != nil || string(out) != "retained\n" {
+			t.Fatalf("inherited configuration lost: out=%q err=%v", out, err)
+		}
+	})
+
+	t.Run("Git ignores inherited replacement namespace", func(t *testing.T) {
+		f := newEnsureFixture(t, bin)
+		original := strings.TrimSpace(f.git("rev-parse", "HEAD"))
+		f.git("-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "--allow-empty", "-m", "replacement")
+		f.git("update-ref", "refs/foreign-replacements/"+original, "HEAD")
+		t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
+		t.Setenv("GIT_CONFIG_GLOBAL", os.DevNull)
+		t.Setenv("GIT_REPLACE_REF_BASE", "refs/foreign-replacements/")
+		out, err := ensureGit(f.repo, 10*time.Second, "log", "-1", "--format=%s", original)
+		if err != nil || string(out) != "fixture\n" {
+			t.Fatalf("foreign replacement changed object: got=%q err=%v", out, err)
+		}
+	})
+
+	t.Run("local origin refreshes stale base with narrowed mapping", func(t *testing.T) {
+		f, origin := newEnsureFixture(t, bin), newEnsureFixture(t, bin)
+		f.git("remote", "add", "origin", origin.repo)
+		// Establish actual shared history before advancing origin. Independently
+		// created fixture commits need not have the same timestamp or object ID.
+		f.git("fetch", "origin", "refs/heads/main:refs/remotes/origin/main")
+		stale := strings.TrimSpace(f.git("rev-parse", "refs/remotes/origin/main"))
+		f.git("config", "remote.origin.fetch", "+refs/heads/other:refs/remotes/origin/other")
+		origin.git("-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "--allow-empty", "-m", "new origin base")
+		fresh := strings.TrimSpace(origin.git("rev-parse", "HEAD"))
+		if stale == fresh {
+			t.Fatal("fixture base must start stale")
+		}
+		origin.git("merge-base", "--is-ancestor", stale, fresh)
+		before := f.git("show-ref", "--heads")
+		f.localOrigin, f.wantBase = origin.repo, fresh
+		stdout, stderr, err := f.run("--cwd", f.repo, "--branch", "feature/a", "--base", "main", "--path", f.target)
+		if err != nil {
+			t.Fatalf("local fetch: %v stdout=%q stderr=%q", err, stdout, stderr)
+		}
+		if got := strings.TrimSpace(f.git("rev-parse", "refs/remotes/origin/main")); got != fresh {
+			t.Fatalf("origin/main stayed stale: got=%s want=%s", got, fresh)
+		}
+		f.assertCalls("worktree.create", map[string]any{"cwd": f.repo, "branch": "feature/a", "base": "origin/main", "path": f.target, "focus": false})
+		if got := f.git("show-ref", "--heads"); got != before {
+			t.Fatalf("local branches changed: before=%s after=%s", before, got)
+		}
+		if strings.Count(f.log(), "fetch ") != 1 {
+			t.Fatalf("want one fetch: %s", f.log())
+		}
+	})
+
+	t.Run("local origin missing base stops before native without retry", func(t *testing.T) {
+		f, origin := newEnsureFixture(t, bin), newEnsureFixture(t, bin)
+		f.git("remote", "add", "origin", origin.repo)
+		f.git("fetch", "origin", "refs/heads/main:refs/remotes/origin/main")
+		stale := strings.TrimSpace(f.git("rev-parse", "refs/remotes/origin/main"))
+		f.git("config", "remote.origin.fetch", "+refs/heads/other:refs/remotes/origin/other")
+		origin.git("branch", "-m", "other")
+		f.localOrigin = origin.repo
+		before := f.git("show-ref", "--heads")
+		f.assertFailure("git fetch", 0, "--cwd", f.repo, "--branch", "feature/a", "--base", "main", "--path", f.target)
+		if strings.Count(f.log(), "fetch ") != 1 {
+			t.Fatalf("failed fetch must not retry: %s", f.log())
+		}
+		if got := strings.TrimSpace(f.git("rev-parse", "refs/remotes/origin/main")); got != stale {
+			t.Fatalf("failed fetch changed stale ref: got=%s want=%s", got, stale)
+		}
+		if got := f.git("show-ref", "--heads"); got != before {
+			t.Fatalf("local branches changed: before=%s after=%s", before, got)
 		}
 	})
 
@@ -143,6 +300,7 @@ func TestEnsureWorktree(t *testing.T) {
 			{"empty base", "--base", "", "base"},
 			{"invalid base", "--base", "main:other", "base"},
 			{"leading option base", "--base", "--upload-pack=evil", "base"},
+			{"leading plus base", "--base", "+main", "base"},
 			{"missing path", "--path", "OMIT", "path"},
 			{"empty path", "--path", "", "path"},
 			{"relative path", "--path", "relative", "path"},
@@ -201,7 +359,7 @@ func TestEnsureWorktree(t *testing.T) {
 
 	t.Run("validate unused and repeated arguments", func(t *testing.T) {
 		for _, extra := range [][]string{
-			{"--base", "bad..base"}, {"--path", "relative"}, {"--branch", "--evil", "--branch", "feature/a"},
+			{"--base", "bad..base"}, {"--base", "+main"}, {"--path", "relative"}, {"--branch", "--evil", "--branch", "feature/a"},
 			{"--base", "", "--base", "main"}, {"--focus", "unexpected"},
 		} {
 			t.Run(strings.Join(extra, " "), func(t *testing.T) {
@@ -299,6 +457,8 @@ type ensureFixture struct {
 	bin, dir, repo, target, realGit, wrapperDir, logPath, mode string
 	reply                                                      map[string]any
 	rawReply                                                   string
+	cliEnv                                                     []string
+	localOrigin, wantBase                                      string
 	mu                                                         sync.Mutex
 	calls                                                      []request
 }
@@ -321,13 +481,20 @@ func newEnsureFixture(t *testing.T, bin string) *ensureFixture {
 	}
 	f.git("init", "-b", "main")
 	f.git("-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "--allow-empty", "-m", "fixture")
-	// Never pass fetch through, even if production supplies unexpected arguments.
+	// Fetch is synthetic unless this fixture explicitly permits a temporary file
+	// origin. Even then, deny all other protocols and unexpected arguments.
 	script := `#!/bin/sh
 printf '%s\n' "$*" >> "$ENSURE_LOG"
 case "$1" in
 fetch)
   if [ "$ENSURE_MODE" = fetch-fail ]; then echo 'synthetic fetch failure' >&2; exit 1; fi
-  [ "$#" = 3 ] && [ "$2" = origin ] && [ "$3" = main ] || exit 91
+  [ "$#" = 3 ] && [ "$2" = origin ] || exit 91
+  case "$3" in main|+main|refs/heads/main:refs/remotes/origin/main) ;; *) exit 91;; esac
+  if [ -n "$ENSURE_LOCAL_ORIGIN" ]; then
+    [ "$("$ENSURE_REAL_GIT" remote get-url origin)" = "$ENSURE_LOCAL_ORIGIN" ] || exit 94
+    export GIT_ALLOW_PROTOCOL=file
+    exec "$ENSURE_REAL_GIT" "$@"
+  fi
   exit 0;;
 worktree)
   [ "$2" = list ] || exit 92
@@ -357,12 +524,15 @@ exec "$ENSURE_REAL_GIT" "$@"
 }
 
 func (f *ensureFixture) env() []string {
-	return []string{"PATH=" + f.wrapperDir + string(os.PathListSeparator) + os.Getenv("PATH"), "HOME=" + f.dir, "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=" + os.DevNull, "GIT_TERMINAL_PROMPT=0", "ENSURE_REAL_GIT=" + f.realGit, "ENSURE_LOG=" + f.logPath, "ENSURE_MODE=" + f.mode}
+	return []string{"PATH=" + f.wrapperDir + string(os.PathListSeparator) + os.Getenv("PATH"), "HOME=" + f.dir, "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=" + os.DevNull, "GIT_TERMINAL_PROMPT=0", "GIT_ALLOW_PROTOCOL=file", "ENSURE_REAL_GIT=" + f.realGit, "ENSURE_LOG=" + f.logPath, "ENSURE_MODE=" + f.mode, "ENSURE_LOCAL_ORIGIN=" + f.localOrigin}
 }
 
 func (f *ensureFixture) git(args ...string) string {
 	f.t.Helper()
-	cmd := exec.Command(f.realGit, args...)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, f.realGit, args...)
+	cmd.WaitDelay = time.Second
 	cmd.Dir, cmd.Env = f.repo, f.env()
 	out, err := cmd.CombinedOutput()
 	if err != nil {
@@ -412,6 +582,14 @@ func (f *ensureFixture) run(args ...string) (string, string, error) {
 				} else if f.rawReply != "" {
 					fmt.Fprint(conn, f.rawReply)
 				} else {
+					if f.wantBase != "" {
+						cmd := exec.Command(f.realGit, "rev-parse", "refs/remotes/origin/main")
+						cmd.Dir, cmd.Env = f.repo, f.env()
+						out, err := cmd.Output()
+						if err != nil || strings.TrimSpace(string(out)) != f.wantBase {
+							f.t.Errorf("base must be fresh before native call: got=%q err=%v want=%s", out, err, f.wantBase)
+						}
+					}
 					_ = json.NewEncoder(conn).Encode(f.reply)
 				}
 			}
@@ -421,7 +599,7 @@ func (f *ensureFixture) run(args ...string) (string, string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, f.bin, append([]string{"ensure-worktree"}, args...)...)
-	cmd.Env = append(f.env(), "HERDR_SOCKET_PATH="+socket)
+	cmd.Env = append(append(f.env(), f.cliEnv...), "HERDR_SOCKET_PATH="+socket)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
 	err = cmd.Run()

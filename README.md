@@ -206,17 +206,24 @@ herdr-plus ensure-worktree --cwd /absolute/repo --branch feature/a \
 
 `--cwd` and `--branch` are required. The command resolves symlinks and the Git
 repository root from the explicit cwd; it does not select another client's
-focused pane or load project configuration. Branch names are literal Git branch
+focused pane or load project configuration. Inherited Git repository, index,
+and object selectors cannot override that cwd; Git transport, authentication,
+and configuration settings remain available. Branch names are literal Git branch
 names. `--base` is a remote branch tail under `origin` (for example, `main` or
-`release/stable`), not a revision expression or fetch refspec. `--path` must be
-absolute. Supplied values are validated even when existing state makes them
-unnecessary. Duplicate string flags and positional arguments are rejected.
+`release/stable`), not a revision expression or fetch refspec; a leading `+` is
+rejected. `--path` must be absolute. Supplied values are validated even when
+existing state makes them unnecessary. Duplicate string flags and positional
+arguments are rejected.
 
 | Git state for the exact branch | Native operation |
 | --- | --- |
 | Registered checkout | `worktree.open` with cwd, branch, and focus; Git's registered path wins over any supplied path. |
 | Local branch without a checkout | `worktree.create` with cwd, branch, focus, and path if supplied; preserves the branch without fetching or passing a base. |
-| Neither | Requires base and path; runs `git fetch origin BASE`, then `worktree.create` with base `origin/BASE` and the explicit path. |
+| Neither | Requires base and path; runs `git fetch origin refs/heads/BASE:refs/remotes/origin/BASE`, then `worktree.create` with base `origin/BASE` and the explicit path. |
+
+The explicit fetch destination refreshes `origin/BASE` even when
+`remote.origin.fetch` excludes BASE. A failed fetch stops before native create
+and is never retried; local branches are never force-updated or reset.
 
 An existing target file, directory, or dangling symlink is refused before creating
 a checkout. An existing registered checkout needs neither base nor path. Focus is
@@ -241,10 +248,13 @@ unknown outcome and is never automatically retried.
 Run `go test -run 'TestEnsureWorktree' ./...` for the API verification recipe,
 then `go test ./...` and `git diff --check`. The focused suite builds and executes
 the real CLI, uses disposable Git repositories with isolated Git configuration,
-and checks calls through a synthetic Unix socket. Fetch is intercepted by a
-controlled executable; tests never fetch a remote or mutate live Herdr. Fixtures,
-sockets, and owned processes are cleaned up. The Unix socket suite is skipped on
-Windows; named-pipe and installed/native acceptance remain separate gates.
+and checks calls through a synthetic Unix socket. A controlled executable
+intercepts fetch except for an explicitly allowed temporary local-file origin
+that verifies actual remote-tracking ref freshness with a narrowed fetch mapping.
+That fixture allows only the file protocol; tests never fetch over the network
+or mutate live Herdr. Additional real Git queries check index/object isolation.
+Fixtures, sockets, and owned processes are cleaned up. The Unix socket suite is
+skipped on Windows; named-pipe and installed/native acceptance remain separate gates.
 
 Naming policy, issue-ID lookup, contextual P, W/G/L caller migration, and
 installed/native acceptance are separate dependent slices. This command does not

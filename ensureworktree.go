@@ -129,7 +129,9 @@ func ensureWorktree(args []string) (json.RawMessage, error) {
 			params["path"], expectedPath = path, path
 		}
 		if absent {
-			if _, err := ensureGit(canonical, 2*time.Minute, "fetch", "origin", base); err != nil {
+			// Map the destination explicitly: remote.origin.fetch may exclude BASE
+			// and leave a previously fetched origin/BASE stale.
+			if _, err := ensureGit(canonical, 2*time.Minute, "fetch", "origin", "refs/heads/"+base+":refs/remotes/origin/"+base); err != nil {
 				return nil, err
 			}
 			params["base"] = "origin/" + base
@@ -152,8 +154,9 @@ func ensureWorktree(args []string) (json.RawMessage, error) {
 
 func ensureBranchName(cwd, flagName, value string) error {
 	// Use a full ref so Git cannot expand @{-1}; branch shorthand must never
-	// silently select another branch. Leading '-' is unsafe for fetch/native CLI.
-	if value == "" || strings.HasPrefix(value, "-") || value == "HEAD" {
+	// silently select another branch. Leading '-' is unsafe for fetch/native CLI;
+	// a base beginning with '+' is force-refspec syntax, not an accepted base.
+	if value == "" || strings.HasPrefix(value, "-") || value == "HEAD" || (flagName == "base" && strings.HasPrefix(value, "+")) {
 		return fmt.Errorf("invalid --%s branch name %q", flagName, value)
 	}
 	if _, err := ensureGit(cwd, 10*time.Second, "check-ref-format", "refs/heads/"+value); err != nil {
@@ -167,6 +170,22 @@ func ensureGit(cwd string, timeout time.Duration, args ...string) ([]byte, error
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "git", args...)
 	cmd.Dir = cwd
+	// Explicit cwd owns repository discovery and its per-repository state.
+	// Preserve transport, authentication and config variables (including
+	// GIT_CONFIG_*); only inherited repository/object selection is excluded.
+	cmd.Env = make([]string, 0, len(os.Environ()))
+	for _, entry := range os.Environ() {
+		key, _, _ := strings.Cut(entry, "=")
+		switch key {
+		case "GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE",
+			"GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+			"GIT_GRAFT_FILE", "GIT_SHALLOW_FILE", "GIT_REPLACE_REF_BASE",
+			"GIT_NO_REPLACE_OBJECTS", "GIT_IMPLICIT_WORK_TREE", "GIT_PREFIX",
+			"GIT_CEILING_DIRECTORIES", "GIT_DISCOVERY_ACROSS_FILESYSTEM":
+			continue
+		}
+		cmd.Env = append(cmd.Env, entry)
+	}
 	// Bound pipe draining too, e.g. when a Git transport leaves a child holding it.
 	cmd.WaitDelay = time.Second
 	var stderr bytes.Buffer

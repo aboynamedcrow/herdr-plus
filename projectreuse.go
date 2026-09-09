@@ -421,7 +421,7 @@ func resolveCheckoutForReuse(client *herdrClient, dir string) (*gitCheckout, err
 	}
 
 	raw := matches[0].OpenWorkspaceID
-	if raw == nil || strings.TrimSpace(*raw) == "" {
+	if raw == nil {
 		// Registered, consistent, and not open anywhere: create it, then bind it.
 		return checkout, nil
 	}

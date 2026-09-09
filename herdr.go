@@ -410,30 +410,28 @@ func (c *herdrClient) focusedPaneID() (string, error) {
 	return "", errors.New("no focused pane")
 }
 
-// workspacePaneCount returns how many panes currently live in the given
-// workspace. The worktree handler uses it as an idempotency guard: a freshly
-// created or opened worktree workspace has exactly one (root) pane, so a count
-// above one means the layout was already applied — and we should not apply it
-// again. A socket failure returns the error (with a zero count), and the handler
-// refuses to lay out on either an error or a zero count: neither can establish
-// that the workspace is fresh, and laying tabs into work that is already there
-// would be worse than doing nothing visibly.
-func (c *herdrClient) workspacePaneCount(workspaceID string) (int, error) {
+// workspacePanes returns a validated inventory for one explicit workspace.
+// Incomplete or duplicate identities cannot authorize applying a fresh layout.
+func (c *herdrClient) workspacePanes(workspaceID string) ([]paneInfo, error) {
 	var out struct {
-		Panes []struct {
-			WorkspaceID string `json:"workspace_id"`
-		} `json:"panes"`
+		Panes *[]paneInfo `json:"panes"`
 	}
-	if err := c.call("pane.list", map[string]any{}, &out); err != nil {
-		return 0, err
+	if err := c.call("pane.list", map[string]any{"workspace_id": workspaceID}, &out); err != nil {
+		return nil, err
 	}
-	n := 0
-	for _, p := range out.Panes {
-		if p.WorkspaceID == workspaceID {
-			n++
+	if out.Panes == nil {
+		return nil, errors.New("malformed pane.list result: no panes array")
+	}
+	seen := make(map[string]bool)
+	for _, pane := range *out.Panes {
+		if pane.WorkspaceID != workspaceID ||
+			!workspaceIDPattern.MatchString(pane.PaneID) ||
+			!workspaceIDPattern.MatchString(pane.TabID) || seen[pane.PaneID] {
+			return nil, errors.New("malformed pane.list result: incomplete, unrelated or duplicate pane identity")
 		}
+		seen[pane.PaneID] = true
 	}
-	return n, nil
+	return *out.Panes, nil
 }
 
 // paneGet fetches metadata for a single pane, including its working directory

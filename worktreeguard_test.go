@@ -33,7 +33,14 @@ func TestWorktreeEventInventoryGuard(t *testing.T) {
 		{"empty inventory", `{"result":{"panes":[]}}`, false, false},
 		{"missing inventory", `{"result":{}}`, false, false},
 		{"unrelated workspace only", `{"result":{"panes":[{"workspace_id":"w2","pane_id":"w2:p1"}]}}`, false, false},
-		{"existing layout", `{"result":{"panes":[{"workspace_id":"w1","pane_id":"w1:p1"},{"workspace_id":"w1","pane_id":"w1:p2"}]}}`, true, false},
+		{"existing layout", `{"result":{"panes":[{"workspace_id":"w1","pane_id":"w1:p1","tab_id":"w1:t1"},{"workspace_id":"w1","pane_id":"w1:p2","tab_id":"w1:t1"}]}}`, true, false},
+		{"missing pane identity", `{"result":{"panes":[{"workspace_id":"w1"}]}}`, false, false},
+		{"partly attributed inventory", `{"result":{"panes":[{"workspace_id":"w1","pane_id":"w1:p1","tab_id":"w1:t1"},{"pane_id":"w1:p2","tab_id":"w1:t1"}]}}`, false, false},
+		{"null pane", `{"result":{"panes":[null]}}`, false, false},
+		{"duplicate pane", `{"result":{"panes":[{"workspace_id":"w1","pane_id":"w1:p1","tab_id":"w1:t1"},{"workspace_id":"w1","pane_id":"w1:p1","tab_id":"w1:t1"}]}}`, false, false},
+		{"wrong root pane", `{"result":{"panes":[{"workspace_id":"w1","pane_id":"w1:p9","tab_id":"w1:t1"}]}}`, false, false},
+		{"wrong root tab", `{"result":{"panes":[{"workspace_id":"w1","pane_id":"w1:p1","tab_id":"w1:t9"}]}}`, false, false},
+		{"fresh single root", `{"result":{"panes":[{"workspace_id":"w1","pane_id":"w1:p1","tab_id":"w1:t1"}]}}`, true, false},
 		{"native already open", "", true, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -71,8 +78,10 @@ func TestWorktreeEventInventoryGuard(t *testing.T) {
 					}
 					if json.NewDecoder(conn).Decode(&req) == nil {
 						calls = append(calls, req.Method)
-						if req.Method == "pane.list" {
+						if req.Method == "pane.list" && req.Params["workspace_id"] == "w1" {
 							_, _ = conn.Write([]byte(tc.reply + "\n"))
+						} else if req.Method == "tab.rename" && tc.name == "fresh single root" {
+							_, _ = conn.Write([]byte("{\"result\":{}}\n"))
 						} else {
 							_, _ = conn.Write([]byte("{\"error\":{\"code\":\"unexpected_mutation\",\"message\":\"inventory did not authorize layout\"}}\n"))
 						}
@@ -105,6 +114,9 @@ func TestWorktreeEventInventoryGuard(t *testing.T) {
 			var wantCalls []string
 			if !tc.alreadyOpen {
 				wantCalls = []string{"pane.list"}
+			}
+			if tc.name == "fresh single root" {
+				wantCalls = append(wantCalls, "tab.rename")
 			}
 			if !reflect.DeepEqual(calls, wantCalls) {
 				t.Fatalf("layout proceeded without inventory proof: %v; output=%s", calls, out)

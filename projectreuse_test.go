@@ -1821,6 +1821,22 @@ func TestOpenProjectInconsistentCheckoutListingNeverCreates(t *testing.T) {
 			},
 			wantErr: "unusable form",
 		},
+		{
+			name: "empty present open workspace id",
+			entries: func(repo string) []map[string]any {
+				entry := listedCheckout(repo, "")
+				entry["open_workspace_id"] = ""
+				return []map[string]any{entry}
+			},
+			wantErr: "unusable form",
+		},
+		{
+			name: "whitespace present open workspace id",
+			entries: func(repo string) []map[string]any {
+				return []map[string]any{listedCheckout(repo, "   ")}
+			},
+			wantErr: "unusable form",
+		},
 	}
 
 	for _, c := range cases {

@@ -291,16 +291,21 @@ func runOnWorktreeEvent(_ []string) {
 	// means the layout is already in place and we skip rather than stack a second
 	// copy of the tabs on top. Failed or empty inventory cannot establish that
 	// this workspace is fresh, so leave it untouched and report the failure.
-	n, err := client.workspacePaneCount(ev.WorkspaceID)
+	panes, err := client.workspacePanes(ev.WorkspaceID)
 	if err != nil {
 		errExit("inspect worktree workspace before layout:", err)
 	}
+	n := len(panes)
 	if n == 0 {
 		errExit("worktree workspace has no reported panes; refusing layout")
 	}
 	if n > 1 {
 		fmt.Printf("herdr-plus: worktree workspace %q already has %d panes; skipping layout %q (already applied).\n", ev.WorkspaceID, n, layout.source)
 		return
+	}
+
+	if panes[0].PaneID != ev.RootPaneID || panes[0].TabID != ev.RootTabID {
+		errExit("worktree pane inventory does not match the event root; refusing layout")
 	}
 
 	if err := layoutTabs(client, ev.WorkspaceID, ev.RootTabID, ev.RootPaneID, ev.CheckoutPath, layout.Tabs); err != nil {

@@ -120,6 +120,18 @@ func (m worktreeUI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			} else if c.Existing {
 				verb = "check out existing branch"
 			}
+			if c.Action != "" {
+				verb = c.Action + " · PR " + c.PRState + " · " + c.Source
+			}
+			if c.Recommended {
+				verb += " · recommended"
+			}
+			if len(c.StartCommit) >= 12 {
+				verb += " · " + c.StartCommit[:12]
+			}
+			if msg.plan.RemoteState == "UNKNOWN" {
+				verb += " · remote UNKNOWN"
+			}
 			items[i] = listItem{name: c.Branch, desc: verb + " · " + c.Path, selectable: true, ref: i}
 		}
 		m.list = newFuzzyList("Filter branches…", items)

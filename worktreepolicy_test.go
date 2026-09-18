@@ -13,6 +13,9 @@ import (
 
 func policyFixture(t *testing.T) (string, string) {
 	t.Helper()
+	previousPull := policyPullRequest
+	policyPullRequest = func(string, string) branchPull { return branchPull{State: "UNKNOWN"} }
+	t.Cleanup(func() { policyPullRequest = previousPull })
 	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
 	t.Setenv("GIT_CONFIG_GLOBAL", os.DevNull)
 	t.Setenv("GIT_TERMINAL_PROMPT", "0")

@@ -30,11 +30,19 @@ type worktreeRequest struct {
 }
 
 type worktreeChoice struct {
-	ID       string `json:"id"`
-	Branch   string `json:"branch"`
-	Path     string `json:"path"`
-	Existing bool   `json:"existing"`
-	Checkout bool   `json:"checkout"`
+	ID          string `json:"id"`
+	Branch      string `json:"branch"`
+	Path        string `json:"path"`
+	Existing    bool   `json:"existing"`
+	Checkout    bool   `json:"checkout"`
+	Source      string `json:"source"`
+	PRState     string `json:"pr_state"`
+	PRHead      string `json:"pr_head,omitempty"`
+	PRBase      string `json:"pr_base,omitempty"`
+	WorkState   string `json:"work_state,omitempty"`
+	Action      string `json:"action"`
+	Recommended bool   `json:"recommended"`
+	StartCommit string `json:"start_commit"`
 }
 
 type worktreePlan struct {
@@ -46,6 +54,7 @@ type worktreePlan struct {
 	BaseOID     string           `json:"base_oid,omitempty"`
 	Candidates  []worktreeChoice `json:"candidates"`
 	Fingerprint string           `json:"fingerprint"`
+	RemoteState string           `json:"remote_state"`
 }
 
 func parseWorktreeRequest(args []string, apply bool) (worktreeRequest, error) {
@@ -402,6 +411,20 @@ func planWorktree(req worktreeRequest) (worktreePlan, error) {
 		paths[name] = record.Path
 	}
 	plan = worktreePlan{Version: 1, Project: policy.Name, Repository: primary, Issue: strings.ToUpper(req.Issue), Candidates: []worktreeChoice{}}
+	remoteHeads, remoteErr := policyRemoteHeads(primary)
+	plan.RemoteState = "verified"
+	if remoteErr != nil {
+		plan.RemoteState = "UNKNOWN"
+	}
+	occupied := map[string]string{}
+	for name, oid := range remoteHeads {
+		occupied[name] = oid
+	}
+	for name, oid := range heads {
+		occupied[name] = oid
+	}
+	finished := false
+	unfinished := false
 	for name := range heads {
 		if req.Issue != "" && !matchesIssue(name, req.Issue) {
 			continue
@@ -413,11 +436,41 @@ func planWorktree(req worktreeRequest) (worktreePlan, error) {
 		if !checkedOut {
 			path = filepath.Join(policy.Root, strings.ReplaceAll(name, "/", "--"))
 		}
-		plan.Candidates = append(plan.Candidates, worktreeChoice{Branch: name, Path: path, Existing: true, Checkout: checkedOut})
+		choice := worktreeChoice{Branch: name, Path: path, Existing: true, Checkout: checkedOut,
+			Source: "local", StartCommit: heads[name]}
+		if describeChoice(primary, &choice) {
+			finished = true
+		} else {
+			unfinished = true
+		}
+		plan.Candidates = append(plan.Candidates, choice)
 	}
-	if len(plan.Candidates) == 0 {
+	for name, oid := range remoteHeads {
+		if _, local := heads[name]; local {
+			continue
+		}
+		if (req.Issue != "" && !matchesIssue(name, req.Issue)) || (req.Issue == "" && name != branch && name != req.Name) {
+			continue
+		}
+		choice := worktreeChoice{Branch: name, Path: filepath.Join(policy.Root, strings.ReplaceAll(name, "/", "--")),
+			Source: "remote", StartCommit: oid}
+		if describeChoice(primary, &choice) {
+			finished = true
+		} else {
+			unfinished = true
+		}
+		plan.Candidates = append(plan.Candidates, choice)
+	}
+	if len(plan.Candidates) == 0 || (finished && remoteErr == nil) {
 		if nameErr != nil {
 			return plan, nameErr
+		}
+		if remoteErr != nil {
+			return plan, fmt.Errorf("cannot check branch collisions: %w", remoteErr)
+		}
+		branch, err = unusedPolicyBranch(cfg.Worktree.BranchPrefix, req.Name, req.Issue, policy.MaxTail, policy.Root, occupied)
+		if err != nil {
+			return plan, err
 		}
 		if err := ensureBranchName(primary, "branch", branch); err != nil {
 			return plan, err
@@ -426,9 +479,15 @@ func planWorktree(req worktreeRequest) (worktreePlan, error) {
 		if err != nil {
 			return plan, err
 		}
-		plan.Candidates = append(plan.Candidates, worktreeChoice{Branch: branch, Path: filepath.Join(policy.Root, strings.ReplaceAll(branch, "/", "--"))})
+		plan.Candidates = append(plan.Candidates, worktreeChoice{Branch: branch, Path: filepath.Join(policy.Root, strings.ReplaceAll(branch, "/", "--")),
+			Source: "new", PRState: "NONE", Action: "create fresh from " + plan.Base, Recommended: !unfinished, StartCommit: plan.BaseOID})
 	}
-	sort.Slice(plan.Candidates, func(i, j int) bool { return plan.Candidates[i].Branch < plan.Candidates[j].Branch })
+	sort.Slice(plan.Candidates, func(i, j int) bool {
+		if plan.Candidates[i].Recommended != plan.Candidates[j].Recommended {
+			return plan.Candidates[i].Recommended
+		}
+		return plan.Candidates[i].Branch < plan.Candidates[j].Branch
+	})
 	for i := range plan.Candidates {
 		c := &plan.Candidates[i]
 		hash := sha256.Sum256([]byte(c.Branch + "\x00" + c.Path))
@@ -438,7 +497,8 @@ func planWorktree(req worktreeRequest) (worktreePlan, error) {
 		Plan                   worktreePlan
 		Policy                 WorktreePolicy
 		Prefix, Registry, Refs string
-	}{plan, policy, cfg.Worktree.BranchPrefix, string(listing), string(refs)})
+		Remote                 map[string]string
+	}{plan, policy, cfg.Worktree.BranchPrefix, string(listing), string(refs), remoteHeads})
 	if err != nil {
 		return plan, err
 	}
@@ -483,7 +543,11 @@ func applyWorktreePlan(req worktreeRequest, plan worktreePlan) (json.RawMessage,
 		args = append(args, "--path", selected.Path)
 	}
 	if !selected.Existing {
-		args = append(args, "--base", plan.Base)
+		base := plan.Base
+		if selected.Source == "remote" {
+			base = selected.Branch
+		}
+		args = append(args, "--base", base)
 	}
 	// The flags above name the selection; the snapshot below is what the user
 	// actually accepted. ensure-worktree reads Git again, and without the
@@ -497,6 +561,7 @@ func applyWorktreePlan(req worktreeRequest, plan worktreePlan) (json.RawMessage,
 		Path:       selected.Path,
 		Checkout:   selected.Checkout,
 		Existing:   selected.Existing,
-		BaseOID:    plan.BaseOID,
+		BaseOID:    selected.StartCommit,
+		BranchOID:  selected.StartCommit,
 	})
 }

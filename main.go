@@ -71,6 +71,9 @@ func main() {
 		case "ping":
 			runPing()
 			return
+		case "on-workspace-rename":
+			runOnWorkspaceRename()
+			return
 		case "on-worktree":
 			runOnWorktreeEvent(os.Args[2:])
 			return

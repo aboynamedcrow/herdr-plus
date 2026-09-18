@@ -205,3 +205,14 @@ command = ["./bin/herdr-plus", "on-worktree"]
 on = "worktree.opened"
 platforms = ["windows"]
 command = ["powershell", "-NoProfile", "-NonInteractive", "-Command", "& .\\bin\\herdr-plus.exe on-worktree"]
+
+# Keep derived Crew labels aligned with native workspace renames.
+[[events]]
+on = "workspace.renamed"
+platforms = ["linux", "macos"]
+command = ["./bin/herdr-plus", "on-workspace-rename"]
+
+[[events]]
+on = "workspace.renamed"
+platforms = ["windows"]
+command = ["powershell", "-NoProfile", "-NonInteractive", "-Command", "& .\\bin\\herdr-plus.exe on-workspace-rename"]

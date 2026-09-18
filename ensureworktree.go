@@ -328,6 +328,15 @@ func ensureWorktreeSelected(args []string, want *worktreeSelection) (json.RawMes
 		if err != nil {
 			return nil, err
 		}
+		if want != nil && parent.WorkspaceID == workspace && parent.Worktree == nil {
+			if err := registerPrimaryCheckout(client, workspace, gitCheckout{Path: canonical, Primary: canonical}); err != nil {
+				return nil, err
+			}
+			parent, err = client.workspaceGet(workspace)
+			if err != nil {
+				return nil, err
+			}
+		}
 		// Ask Git for the same value herdr derives repo_key from, rather than
 		// accepting the key the record carries.
 		commonDir, err := ensureGit(canonical, 10*time.Second, "rev-parse", "--path-format=absolute", "--git-common-dir")

@@ -218,6 +218,9 @@ func openProject(client *herdrClient, p Project, reuse reuseOptions) error {
 		if err != nil {
 			return err
 		}
+		if checkout != nil && checkout.ExistingWorkspace != "" {
+			return focusExistingWorkspace(client, workspaceCandidate{WorkspaceID: checkout.ExistingWorkspace}, checkout.Path)
+		}
 	}
 
 	ws, rootTab, rootPane, err := client.workspaceCreate(dir, p.Name, true)

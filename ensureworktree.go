@@ -52,7 +52,8 @@ type worktreeSelection struct {
 	Existing bool
 	// BaseOID is the commit the plan resolved the base ref to. It is empty for
 	// a candidate that needs no base.
-	BaseOID string
+	BaseOID   string
+	BranchOID string
 }
 
 // isObjectID reports whether value is a full Git object id — SHA-1 or SHA-256.
@@ -373,6 +374,15 @@ func ensureWorktreeSelected(args []string, want *worktreeSelection) (json.RawMes
 		if err := want.verifyBranchPresence(branch, absent); err != nil {
 			return nil, err
 		}
+		if !absent && want.BranchOID != "" {
+			oid, err := ensureGit(canonical, 10*time.Second, "rev-parse", "refs/heads/"+branch)
+			if err != nil {
+				return nil, err
+			}
+			if strings.TrimSpace(string(oid)) != want.BranchOID {
+				return nil, errWorktreeSelectionChanged
+			}
+		}
 	}
 	var result json.RawMessage
 	if err := client.call(method, params, &result); err != nil {
@@ -405,19 +415,7 @@ func ensureGit(cwd string, timeout time.Duration, args ...string) ([]byte, error
 	// Explicit cwd owns repository discovery and its per-repository state.
 	// Preserve transport, authentication and config variables (including
 	// GIT_CONFIG_*); only inherited repository/object selection is excluded.
-	cmd.Env = make([]string, 0, len(os.Environ()))
-	for _, entry := range os.Environ() {
-		key, _, _ := strings.Cut(entry, "=")
-		switch key {
-		case "GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE",
-			"GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES",
-			"GIT_GRAFT_FILE", "GIT_SHALLOW_FILE", "GIT_REPLACE_REF_BASE",
-			"GIT_NO_REPLACE_OBJECTS", "GIT_IMPLICIT_WORK_TREE", "GIT_PREFIX",
-			"GIT_CEILING_DIRECTORIES", "GIT_DISCOVERY_ACROSS_FILESYSTEM":
-			continue
-		}
-		cmd.Env = append(cmd.Env, entry)
-	}
+	cmd.Env = ensureGitEnv()
 	// Bound pipe draining too, e.g. when a Git transport leaves a child holding it.
 	cmd.WaitDelay = time.Second
 	var stderr bytes.Buffer
@@ -430,6 +428,23 @@ func ensureGit(cwd string, timeout time.Duration, args ...string) ([]byte, error
 		return nil, fmt.Errorf("git %s: %w: %s", args[0], err, strings.TrimSpace(stderr.String()))
 	}
 	return out, nil
+}
+
+func ensureGitEnv() []string {
+	env := make([]string, 0, len(os.Environ()))
+	for _, entry := range os.Environ() {
+		key, _, _ := strings.Cut(entry, "=")
+		switch key {
+		case "GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE",
+			"GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+			"GIT_GRAFT_FILE", "GIT_SHALLOW_FILE", "GIT_REPLACE_REF_BASE",
+			"GIT_NO_REPLACE_OBJECTS", "GIT_IMPLICIT_WORK_TREE", "GIT_PREFIX",
+			"GIT_CEILING_DIRECTORIES", "GIT_DISCOVERY_ACROSS_FILESYSTEM":
+			continue
+		}
+		env = append(env, entry)
+	}
+	return env
 }
 
 // gitWorktreeRecord is one entry of `git worktree list --porcelain -z`: the

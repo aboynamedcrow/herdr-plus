@@ -108,7 +108,8 @@ func returnToCrew(client *herdrClient, pc pluginContext, crewTab string) (bool, 
 		if t.WorkspaceID != "" && t.WorkspaceID != ws.WorkspaceID {
 			continue
 		}
-		if strings.TrimSpace(t.Label) == label {
+		bound := ws.Tokens["crew_crew_tab"]
+		if (bound != "" && t.TabID == bound) || (bound == "" && strings.TrimSpace(t.Label) == label) {
 			matches = append(matches, t)
 		}
 	}

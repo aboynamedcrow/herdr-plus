@@ -35,6 +35,7 @@ const maxPanesPerTab = 4
 // for the first pane, which has nothing to split off. WorkingDir overrides the
 // directory the pane starts in, falling back to its tab's and then the project's.
 type ProjectPane struct {
+	Role       string  `toml:"role"`
 	Command    string  `toml:"command"`
 	Split      string  `toml:"split"`
 	Label      string  `toml:"label"`
@@ -74,6 +75,7 @@ func (p ProjectPane) splitRatio() float64 {
 // [[tabs.panes]] (up to maxPanesPerTab of them). A tab with neither is an empty
 // terminal.
 type ProjectTab struct {
+	Role    string        `toml:"role"`
 	Name    string        `toml:"name"`
 	Command string        `toml:"command"`
 	Panes   []ProjectPane `toml:"panes"`
@@ -232,7 +234,24 @@ func (p Project) validate() error {
 // the owning config in error messages — a project's name or a layout's repo, and
 // the file it came from.
 func validateTabs(label, source string, tabs []ProjectTab) error {
+	roles := map[string]bool{}
+	checkRole := func(kind, role string) error {
+		if role == "" {
+			return nil
+		}
+		allowed := map[string]bool{"tab:crew": true, "tab:usage": true, "tab:workers": true,
+			"pane:orchestrator": true, "pane:memory": true, "pane:issue": true}
+		key := kind + ":" + role
+		if !allowed[key] || roles[key] {
+			return fmt.Errorf("invalid or duplicate crew role %q", key)
+		}
+		roles[key] = true
+		return nil
+	}
 	for i, t := range tabs {
+		if err := checkRole("tab", t.Role); err != nil {
+			return err
+		}
 		if strings.TrimSpace(t.Name) == "" {
 			return fmt.Errorf("%q (%s): tab %d is missing a name", label, source, i+1)
 		}
@@ -243,6 +262,9 @@ func validateTabs(label, source string, tabs []ProjectTab) error {
 			return fmt.Errorf("%q (%s): tab %q has %d panes; at most %d are allowed", label, source, t.Name, len(t.Panes), maxPanesPerTab)
 		}
 		for j, pane := range t.Panes {
+			if err := checkRole("pane", pane.Role); err != nil {
+				return err
+			}
 			if _, err := splitTargetIndex(j, pane); err != nil {
 				return fmt.Errorf("%q (%s): tab %q %w", label, source, t.Name, err)
 			}

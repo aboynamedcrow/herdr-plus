@@ -40,6 +40,7 @@ func runEnsureWorktree(args []string) {
 // preserve — its caller supplies the branch, path and base directly — and its
 // semantics are unchanged by these additional constraints.
 type worktreeSelection struct {
+	TaskLabel string
 	// Repository is the canonical primary checkout the plan was built against.
 	Repository string
 	// Branch and Path are the accepted candidate.
@@ -267,6 +268,9 @@ func ensureWorktreeSelected(args []string, want *worktreeSelection) (json.RawMes
 		}
 	}
 	params := map[string]any{"cwd": canonical, "branch": branch, "focus": focus}
+	if want != nil && want.TaskLabel != "" {
+		params["label"] = want.TaskLabel
+	}
 	method, expectedPath := "worktree.open", registered
 	if registered == "" {
 		method = "worktree.create"

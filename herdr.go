@@ -377,13 +377,15 @@ func (c *herdrClient) closePane(paneID string) error {
 
 // paneInfo is the subset of herdr's pane metadata herdr-plus uses.
 type paneInfo struct {
-	PaneID        string `json:"pane_id"`
-	TabID         string `json:"tab_id"`
-	WorkspaceID   string `json:"workspace_id"`
-	TerminalID    string `json:"terminal_id"`
-	Cwd           string `json:"cwd"`
-	ForegroundCwd string `json:"foreground_cwd"`
-	Agent         string `json:"agent"`
+	Label         string            `json:"label"`
+	Tokens        map[string]string `json:"tokens"`
+	PaneID        string            `json:"pane_id"`
+	TabID         string            `json:"tab_id"`
+	WorkspaceID   string            `json:"workspace_id"`
+	TerminalID    string            `json:"terminal_id"`
+	Cwd           string            `json:"cwd"`
+	ForegroundCwd string            `json:"foreground_cwd"`
+	Agent         string            `json:"agent"`
 	AgentSession  struct {
 		Value string `json:"value"`
 	} `json:"agent_session"`

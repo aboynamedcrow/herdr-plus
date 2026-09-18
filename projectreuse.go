@@ -179,8 +179,8 @@ func reuseOpenCheckout(client *herdrClient, dir string, choose chooseWorkspaceFu
 
 	var matches []workspaceCandidate
 	for _, ws := range workspaces {
-		// A workspace herdr records no checkout for is never adopted: without
-		// provenance there is nothing to prove it is this project.
+		// Match recorded identities first. Primary checkout registration runs
+		// separately against the exact native worktree registry entry.
 		if ws.Worktree == nil || strings.TrimSpace(ws.Worktree.CheckoutPath) == "" || strings.TrimSpace(ws.WorkspaceID) == "" {
 			continue
 		}
@@ -311,6 +311,8 @@ type gitCheckout struct {
 	Primary string
 	// For linked checkouts, the already-open, verified primary workspace.
 	PrimaryWorkspace string
+	// An existing primary workspace registered during an explicit project open.
+	ExistingWorkspace string
 }
 
 // resolveGitCheckout reports how a project's directory sits in Git's own
@@ -455,12 +457,63 @@ func resolveCheckoutForReuse(client *herdrClient, dir string) (*gitCheckout, err
 	if !workspaceIDPattern.MatchString(open) {
 		return nil, fmt.Errorf("herdr reports %s is already open, but gave its workspace id in an unusable form (%q); nothing was created or changed", checkout.Path, *raw)
 	}
+	if samePath(checkout.Path, checkout.Primary) {
+		if err := registerPrimaryCheckout(client, open, *checkout); err != nil {
+			return nil, err
+		}
+		checkout.ExistingWorkspace = open
+		return checkout, nil
+	}
 	return nil, fmt.Errorf("herdr reports workspace %s in checkout %s, but holds no checkout provenance for it — so it cannot be identified as this project. Nothing was created or changed. Inspect that workspace; close it when safe, or open the checkout through herdr's own worktree open so it carries provenance", open, checkout.Path)
 }
 
+// Register the exact primary checkout selected by the caller. A workspace can
+// contain other checkouts. Registration changes its native association only.
+func registerPrimaryCheckout(client *herdrClient, id string, checkout gitCheckout) error {
+	if !workspaceIDPattern.MatchString(id) || !samePath(checkout.Path, checkout.Primary) {
+		return fmt.Errorf("cannot register an ambiguous primary checkout")
+	}
+	ws, err := client.workspaceGet(id)
+	if err != nil {
+		return err
+	}
+	common, err := ensureGit(checkout.Primary, 10*time.Second, "rev-parse", "--path-format=absolute", "--git-common-dir")
+	if err != nil {
+		return err
+	}
+	if ws.WorkspaceID != id || ws.Worktree != nil {
+		return verifyNativeParent(ws, id, checkout.Primary, strings.TrimSpace(string(common)))
+	}
+	// Re-read native ownership before the write. Never replace an association.
+	entries, err := client.worktreeList(checkout.Primary)
+	if err != nil {
+		return err
+	}
+	matches := 0
+	for _, entry := range entries {
+		if samePath(entry.Path, checkout.Primary) {
+			matches++
+			if entry.OpenWorkspaceID == nil || *entry.OpenWorkspaceID != id {
+				return fmt.Errorf("primary checkout ownership changed; choose the project again")
+			}
+		}
+	}
+	if matches != 1 {
+		return fmt.Errorf("native primary checkout is missing or ambiguous")
+	}
+	if err := bindCheckoutProvenance(client, id, checkout); err != nil {
+		return err
+	}
+	ws, err = client.workspaceGet(id)
+	if err != nil {
+		return err
+	}
+	return verifyNativeParent(ws, id, checkout.Primary, strings.TrimSpace(string(common)))
+}
+
 // bindCheckoutProvenance attaches herdr's native checkout provenance to a
-// workspace herdr-plus just created, so opening the same project again finds it
-// instead of building a second one.
+// workspace selected by the caller. This also serves a newly created project
+// workspace, so opening that project again finds it.
 //
 // It asks herdr to open the checkout the workspace was created for. herdr sees
 // that checkout is already open, binds it to that very workspace, and reports

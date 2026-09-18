@@ -578,11 +578,9 @@ func TestPolicyApplyCreatesFromTheImmutableAcceptedBase(t *testing.T) {
 	}
 }
 
-// A workspace that holds this very checkout but carries no recorded provenance
-// is refused with its own remedy, not with a claim that it moved. herdr records
-// membership on worktree.open, not on workspace.create, so this is the state a
-// workspace opened outside Plus is in.
-func TestPolicyApplyExplainsMissingParentProvenance(t *testing.T) {
+// Register a primary workspace opened outside Plus before worktree creation.
+// Keep its existing layout.
+func TestPolicyApplyRegistersMissingParentProvenance(t *testing.T) {
 	repo, _ := policyFixture(t)
 	runGit(t, repo, "branch", "ingwon/main")
 	req := worktreeRequest{Cwd: repo, Name: "main"}
@@ -593,19 +591,27 @@ func TestPolicyApplyExplainsMissingParentProvenance(t *testing.T) {
 	req.Fingerprint, req.Candidate = plan.Fingerprint, plan.Candidates[0].ID
 	f := startFakeHerdr(t)
 	f.handle("worktree.list", map[string]any{"worktrees": []any{listedCheckout(repo, "wparent")}})
-	f.handle("workspace.get", map[string]any{"workspace": wsInfoNoProvenance("wparent", "Primary")})
-	f.handle("worktree.open", selectionResult(plan.Candidates[0].Branch, repo))
+	bound := false
+	f.handleFunc("workspace.get", func(request) (any, *herdrError) {
+		if bound {
+			return map[string]any{"workspace": wsInfo("wparent", "Primary", repo, false)}, nil
+		}
+		return map[string]any{"workspace": wsInfoNoProvenance("wparent", "Mixed workspace")}, nil
+	})
+	f.handleFunc("worktree.open", func(req request) (any, *herdrError) {
+		if req.Params["workspace_id"] != "wparent" || req.Params["path"] != repo || req.Params["focus"] != false {
+			t.Errorf("wrong binding: %v", req.Params)
+		}
+		bound = true
+		return map[string]any{"workspace": map[string]any{"workspace_id": "wparent"}, "worktree": map[string]any{"path": repo}, "already_open": true}, nil
+	})
 	f.handle("worktree.create", selectionResult(plan.Candidates[0].Branch, plan.Candidates[0].Path))
-	_, err = applyWorktreePlan(req, plan)
-	if err == nil {
-		t.Fatal("accepted a parent workspace with no recorded provenance")
+	if _, err := applyWorktreePlan(req, plan); err != nil {
+		t.Fatal(err)
 	}
-	if !strings.Contains(err.Error(), "no recorded checkout provenance") {
-		t.Fatalf("refusal does not name the missing provenance: %v", err)
+	if !bound {
+		t.Fatal("primary checkout was not registered")
 	}
-	if strings.Contains(err.Error(), "no longer holds") {
-		t.Fatalf("refusal describes a state that is not the case: %v", err)
-	}
-	f.assertNotCalled("worktree.open")
-	f.assertNotCalled("worktree.create")
+	f.assertNotCalled("workspace.create")
+	f.assertNotCalled("pane.split")
 }

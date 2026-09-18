@@ -1612,29 +1612,56 @@ func TestBindingRefusesChangedOrClosedParent(t *testing.T) {
 	}
 }
 
-// TestOpenProjectRefusesLegacyOpenCheckout is the deferred-decision path: herdr
-// has the checkout open in a workspace it holds no provenance for (an older
-// build made it). Adopting it would mean trusting an identity that cannot be
-// verified, so the open is refused, visibly, and nothing is created.
-func TestOpenProjectRefusesLegacyOpenCheckout(t *testing.T) {
+// Selecting the exact primary project can register an existing workspace.
+func TestOpenProjectRegistersLegacyPrimaryWithoutLayout(t *testing.T) {
 	repo := newGitRepo(t)
 	nf := newNativeFixture(t)
-	// A workspace from before this behavior existed: open on the checkout, no
-	// provenance recorded, and invisible to workspace.list matching.
 	nf.openCheckouts[repo] = "wLEGACY"
-	nf.labels["wLEGACY"] = "repo"
-
+	nf.labels["wLEGACY"] = "Mixed workspace"
 	project := Project{Name: "repo", WorkingDir: repo, Tabs: crewTabs()}
-	err := openProject(nf.client(), project, reuseOptions{enabled: true})
-	if err == nil {
-		t.Fatal("want a visible refusal, got none")
+	if err := openProject(nf.client(), project, reuseOptions{enabled: true}); err != nil {
+		t.Fatal(err)
 	}
-	if !strings.Contains(err.Error(), "wLEGACY") || !strings.Contains(err.Error(), "provenance") {
-		t.Fatalf("error %q must name the workspace and say why it cannot be identified", err)
+	if nf.provenance["wLEGACY"] != repo {
+		t.Fatal("checkout identity missing")
 	}
-	nf.assertNoMutations()
-	nf.assertNotCalled("workspace.focus")
-	nf.assertNotCalled("worktree.open")
+	nf.assertNotCalled("workspace.create")
+	nf.assertNotCalled("pane.split")
+	nf.assertNotCalled("pane.send_text")
+	nf.assertNotCalled("tab.rename")
+}
+
+func TestRegisterPrimaryCheckoutRefusesChangedOwnership(t *testing.T) {
+	repo := newGitRepo(t)
+	checkout, err := resolveGitCheckout(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, owner := range []string{"wOTHER", ""} {
+		t.Run("owner="+owner, func(t *testing.T) {
+			f := startFakeHerdr(t)
+			f.handle("workspace.get", map[string]any{"workspace": wsInfoNoProvenance("wOLD", "Mixed workspace")})
+			f.handle("worktree.list", map[string]any{"worktrees": []any{listedCheckout(repo, owner)}})
+			if err := registerPrimaryCheckout(f.client(), "wOLD", *checkout); err == nil {
+				t.Fatal("changed ownership accepted")
+			}
+			f.assertNotCalled("worktree.open")
+		})
+	}
+}
+
+func TestRegisterPrimaryCheckoutPreservesConflictingRecord(t *testing.T) {
+	repo, other := newGitRepo(t), newGitRepo(t)
+	checkout, err := resolveGitCheckout(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := startFakeHerdr(t)
+	f.handle("workspace.get", map[string]any{"workspace": wsInfo("wOLD", "Other project", other, false)})
+	if err := registerPrimaryCheckout(f.client(), "wOLD", *checkout); err == nil {
+		t.Fatal("conflicting record accepted")
+	}
+	f.assertNotCalled("worktree.open")
 }
 
 // TestOpenProjectBindingFailuresAreVisible covers every way the binding can go

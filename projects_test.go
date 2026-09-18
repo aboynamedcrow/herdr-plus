@@ -370,3 +370,31 @@ func TestLayoutTabsRejectsRootSplitFromBeforeMutating(t *testing.T) {
 		t.Fatalf("native calls %v; an invalid layout must not touch anything", lf.methods())
 	}
 }
+
+func TestCrewNamesAndStableBindings(t *testing.T) {
+	lf := newLayoutFixture(t)
+	lf.handle("workspace.report_metadata", map[string]any{})
+	tabs := []ProjectTab{{Name: "Crew · {task}", Role: "crew", Panes: []ProjectPane{
+		{Label: "Orchestrator · {task}", Role: "orchestrator"},
+		{Label: "Issue · {task}", Role: "issue", Split: SplitRight},
+	}}}
+	if err := layoutTabs(lf.client(), "w1", "w1:t1", "w1:p1", t.TempDir(), tabs, "IC-42 Fix sidebar"); err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, c := range lf.calls {
+		if c.Method == "workspace.report_metadata" {
+			found = true
+			tokens := c.Params["tokens"].(map[string]any)
+			if tokens["crew_crew_tab"] != "w1:t1" || tokens["crew_orchestrator_pane"] != "w1:p1" || tokens["crew_task"] != "IC-42 Fix sidebar" {
+				t.Fatalf("wrong bindings: %v", tokens)
+			}
+		}
+		if c.Method == "tab.rename" && c.Params["label"] != "Crew · IC-42 Fix sidebar" {
+			t.Fatalf("wrong tab name: %v", c.Params)
+		}
+	}
+	if !found {
+		t.Fatal("Crew IDs were not published")
+	}
+}

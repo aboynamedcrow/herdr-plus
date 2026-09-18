@@ -491,6 +491,7 @@ func applyWorktreePlan(req worktreeRequest, plan worktreePlan) (json.RawMessage,
 	// checkout opened instead of the chosen one, or a base that advanced between
 	// the plan and the fetch.
 	return ensureWorktreeSelected(args, &worktreeSelection{
+		TaskLabel:  strings.TrimSpace(strings.TrimSpace(plan.Issue) + " " + strings.TrimSpace(req.Name)),
 		Repository: plan.Repository,
 		Branch:     selected.Branch,
 		Path:       selected.Path,

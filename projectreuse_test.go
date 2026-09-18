@@ -1951,3 +1951,27 @@ func TestOpenProjectInconsistentCheckoutListingNeverCreates(t *testing.T) {
 		})
 	}
 }
+
+func TestReturnToCrewUsesStoredIDAfterRename(t *testing.T) {
+	for _, binding := range []string{"w1:t2", "w1:t9"} {
+		t.Run(binding, func(t *testing.T) {
+			f := crewFixture(t, "Crew", "My renamed crew", "Logs")
+			ws := wsInfo("w1", "task", "/checkout", true)
+			ws["tokens"] = map[string]string{"crew_crew_tab": binding}
+			f.handle("workspace.get", map[string]any{"workspace": ws})
+			pc, err := pluginContextFromEnv()
+			if err != nil {
+				t.Fatal(err)
+			}
+			focused, err := returnToCrew(f.client(), pc, "Crew")
+			if binding == "w1:t9" {
+				if err == nil || focused {
+					t.Fatal("missing bound tab fell back to the Crew label")
+				}
+				f.assertNotCalled("tab.focus")
+			} else if err != nil || !focused || f.paramsFor("tab.focus")["tab_id"] != binding {
+				t.Fatalf("stored tab was not selected: %v", err)
+			}
+		})
+	}
+}

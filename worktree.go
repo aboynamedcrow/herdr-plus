@@ -180,6 +180,7 @@ func layoutSpecificity(l WorktreeLayout) int {
 // root tab, and root pane herdr already created for the worktree (to lay the
 // layout into).
 type worktreeEvent struct {
+	TaskLabel    string
 	WorkspaceID  string
 	RootTabID    string
 	RootPaneID   string
@@ -197,6 +198,7 @@ type worktreeCreatedPayload struct {
 	Data struct {
 		AlreadyOpen bool `json:"already_open"`
 		Workspace   struct {
+			Label       string `json:"label"`
 			WorkspaceID string `json:"workspace_id"`
 			ActiveTabID string `json:"active_tab_id"`
 			Worktree    struct {
@@ -225,6 +227,7 @@ func parseWorktreeEvent(eventJSON string, getenv func(string) string) (worktreeE
 		}
 	}
 	return worktreeEvent{
+		TaskLabel:    p.Data.Workspace.Label,
 		AlreadyOpen:  p.Data.AlreadyOpen,
 		WorkspaceID:  firstNonEmpty(getenv("HERDR_WORKSPACE_ID"), p.Data.Workspace.WorkspaceID),
 		RootTabID:    firstNonEmpty(getenv("HERDR_TAB_ID"), p.Data.Workspace.ActiveTabID),
@@ -308,7 +311,7 @@ func runOnWorktreeEvent(_ []string) {
 		errExit("worktree pane inventory does not match the event root; refusing layout")
 	}
 
-	if err := layoutTabs(client, ev.WorkspaceID, ev.RootTabID, ev.RootPaneID, ev.CheckoutPath, layout.Tabs); err != nil {
+	if err := layoutTabs(client, ev.WorkspaceID, ev.RootTabID, ev.RootPaneID, ev.CheckoutPath, layout.Tabs, firstNonEmpty(ev.TaskLabel, ev.Branch, ev.RepoName)); err != nil {
 		errExit("apply worktree layout:", err)
 	}
 

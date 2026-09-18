@@ -227,7 +227,7 @@ func openProject(client *herdrClient, p Project, reuse reuseOptions) error {
 
 	// Lay the project's tabs into the new workspace. dir anchors any per-tab or
 	// per-pane working_dir written relative to the project.
-	if err := layoutTabs(client, ws, rootTab, rootPane, dir, p.Tabs); err != nil {
+	if err := layoutTabs(client, ws, rootTab, rootPane, dir, p.Tabs, p.Name); err != nil {
 		return err
 	}
 
@@ -385,7 +385,12 @@ func resolveSplitTargets(tabs []ProjectTab) ([][]int, error) {
 //
 // root anchors the optional per-tab and per-pane working_dir: a relative one is
 // resolved against it, and a tab or pane that declares none simply inherits it.
-func layoutTabs(client *herdrClient, ws, rootTab, rootPane, root string, tabs []ProjectTab) error {
+func layoutTabs(client *herdrClient, ws, rootTab, rootPane, root string, tabs []ProjectTab, taskLabels ...string) error {
+	task := filepath.Base(root)
+	if len(taskLabels) > 0 && strings.TrimSpace(taskLabels[0]) != "" {
+		task = strings.Join(strings.Fields(taskLabels[0]), " ")
+	}
+	bindings := map[string]string{"crew_task": task}
 	// pendingRun pairs a pane with the command it should run once all panes exist.
 	type pendingRun struct {
 		pane    string
@@ -411,6 +416,8 @@ func layoutTabs(client *herdrClient, ws, rootTab, rootPane, root string, tabs []
 	}
 
 	for i, t := range tabs {
+		t.Name = strings.ReplaceAll(t.Name, "{task}", task)
+		tabID := rootTab
 		tabRoot := rootPane
 		if i == 0 {
 			// The root tab already exists at the workspace's directory. When this tab
@@ -418,7 +425,7 @@ func layoutTabs(client *herdrClient, ws, rootTab, rootPane, root string, tabs []
 			// "set a tab's cwd" call — so the tab is rebuilt where it belongs and the
 			// original closed, leaving the new one first in the workspace.
 			if dir := dirs[i][0]; dir != "" && dir != root {
-				_, tabRoot, err = client.tabCreate(ws, t.Name, dir, true)
+				tabID, tabRoot, err = client.tabCreate(ws, t.Name, dir, true)
 				if err != nil {
 					return fmt.Errorf("create tab %q: %w", t.Name, err)
 				}
@@ -429,7 +436,7 @@ func layoutTabs(client *herdrClient, ws, rootTab, rootPane, root string, tabs []
 				return fmt.Errorf("rename root tab: %w", err)
 			}
 		} else {
-			_, tabRoot, err = client.tabCreate(ws, t.Name, dirs[i][0], false)
+			tabID, tabRoot, err = client.tabCreate(ws, t.Name, dirs[i][0], false)
 			if err != nil {
 				return fmt.Errorf("create tab %q: %w", t.Name, err)
 			}
@@ -439,7 +446,11 @@ func layoutTabs(client *herdrClient, ws, rootTab, rootPane, root string, tabs []
 		// split off any earlier one rather than only the pane before it. It is
 		// per-tab: a pane index never reaches into another tab's panes.
 		panes := make([]string, len(t.effectivePanes()))
+		if t.Role != "" {
+			bindings["crew_"+t.Role+"_tab"] = tabID
+		}
 		for j, pane := range t.effectivePanes() {
+			pane.Label = strings.ReplaceAll(pane.Label, "{task}", task)
 			paneID := tabRoot
 			if j > 0 {
 				// tabRoot may not be the workspace's original root pane — a first tab
@@ -455,6 +466,9 @@ func layoutTabs(client *herdrClient, ws, rootTab, rootPane, root string, tabs []
 				}
 			}
 			panes[j] = paneID
+			if pane.Role != "" {
+				bindings["crew_"+pane.Role+"_pane"] = paneID
+			}
 			if lbl := strings.TrimSpace(pane.Label); lbl != "" {
 				if err := client.paneRename(paneID, lbl); err != nil {
 					// Labeling is cosmetic — warn but keep building the workspace.
@@ -464,6 +478,13 @@ func layoutTabs(client *herdrClient, ws, rootTab, rootPane, root string, tabs []
 			if strings.TrimSpace(pane.Command) != "" {
 				runs = append(runs, pendingRun{pane: paneID, command: pane.Command})
 			}
+		}
+	}
+	if len(bindings) > 1 {
+		if err := client.call("workspace.report_metadata", map[string]any{
+			"workspace_id": ws, "source": "plugin:cloudmanic.herdr-plus", "tokens": bindings,
+		}, nil); err != nil {
+			return fmt.Errorf("record crew IDs: %w", err)
 		}
 	}
 

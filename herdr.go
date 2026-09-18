@@ -511,6 +511,7 @@ type worktreeProvenance struct {
 // Worktree is nil for a workspace herdr has no checkout provenance for (a plain
 // folder), which is never treated as a match for anything.
 type workspaceInfo struct {
+	Tokens      map[string]string   `json:"tokens"`
 	WorkspaceID string              `json:"workspace_id"`
 	Label       string              `json:"label"`
 	Focused     bool                `json:"focused"`

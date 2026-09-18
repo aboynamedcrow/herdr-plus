@@ -54,6 +54,18 @@ func syncCrewName(client *herdrClient, id string) error {
 		return err
 	}
 	defer unlockCrewFile(lock)
+	journalPath := filepath.Join(directory, strings.TrimSuffix(key, ".lock")+".json")
+	journal := map[string]crewRenameEntry{}
+	if data, err := os.ReadFile(journalPath); err == nil {
+		if err := json.Unmarshal(data, &journal); err != nil {
+			return err
+		}
+		if journal == nil {
+			journal = map[string]crewRenameEntry{}
+		}
+	} else if !os.IsNotExist(err) {
+		return err
+	}
 	ws, err := client.workspaceGet(id)
 	if err != nil {
 		return err
@@ -63,7 +75,7 @@ func syncCrewName(client *herdrClient, id string) error {
 	}
 	old := ws.Tokens["crew_task"]
 	task := strings.Join(strings.Fields(ws.Label), " ")
-	if old == "" || task == "" || task == old {
+	if old == "" || task == "" || (task == old && len(journal) == 0) {
 		return nil
 	}
 	tabs, err := client.tabList(id)
@@ -80,7 +92,7 @@ func syncCrewName(client *herdrClient, id string) error {
 				continue
 			}
 			prefix := map[string]string{"crew": "Crew", "usage": "Usage", "workers": "Workers"}[role]
-			if tab.Label != prefix+" · "+old {
+			if !crewDerivedLabel(tab.Label, prefix+" · "+old, journal[tab.TabID]) {
 				continue
 			}
 			current, err := client.tabGet(tab.TabID)
@@ -90,7 +102,15 @@ func syncCrewName(client *herdrClient, id string) error {
 			if current.WorkspaceID != id || current.TabID != tab.TabID || current.Label != tab.Label {
 				continue
 			}
-			if err := client.tabRename(tab.TabID, prefix+" · "+task); err != nil {
+			next := prefix + " · " + task
+			if next == tab.Label {
+				continue
+			}
+			journal[tab.TabID] = crewRenameEntry{Before: tab.Label, After: next}
+			if err := saveCrewRename(journalPath, journal); err != nil {
+				return err
+			}
+			if err := client.tabRename(tab.TabID, next); err != nil {
 				return err
 			}
 		}
@@ -108,7 +128,7 @@ func syncCrewName(client *herdrClient, id string) error {
 		if role := pane.Tokens["crew_worker_role"]; role != "" && pane.Tokens["crew_role_number"] != "" {
 			prefix = role + " " + pane.Tokens["crew_role_number"]
 		}
-		if prefix == "" || pane.Label != prefix+" · "+old {
+		if prefix == "" || !crewDerivedLabel(pane.Label, prefix+" · "+old, journal[pane.PaneID]) {
 			continue
 		}
 		current, err := client.paneGet(pane.PaneID)
@@ -118,11 +138,60 @@ func syncCrewName(client *herdrClient, id string) error {
 		if current.WorkspaceID != id || current.PaneID != pane.PaneID || current.Label != pane.Label {
 			continue
 		}
-		if err := client.paneRename(pane.PaneID, prefix+" · "+task); err != nil {
+		next := prefix + " · " + task
+		if next == pane.Label {
+			continue
+		}
+		journal[pane.PaneID] = crewRenameEntry{Before: pane.Label, After: next}
+		if err := saveCrewRename(journalPath, journal); err != nil {
+			return err
+		}
+		if err := client.paneRename(pane.PaneID, next); err != nil {
 			return err
 		}
 	}
-	return client.call("workspace.report_metadata", map[string]any{
+	if err := client.call("workspace.report_metadata", map[string]any{
 		"workspace_id": id, "source": "plugin:cloudmanic.herdr-plus", "tokens": map[string]string{"crew_task": task},
-	}, nil)
+	}, nil); err != nil {
+		return err
+	}
+	if err := os.Remove(journalPath); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return nil
+}
+
+type crewRenameEntry struct {
+	Before string `json:"before"`
+	After  string `json:"after"`
+}
+
+func crewDerivedLabel(label, previous string, pending crewRenameEntry) bool {
+	return label == previous || (pending.Before != "" && label == pending.Before) || (pending.After != "" && label == pending.After)
+}
+
+// Persist intent before the native write. A lost reply can mean the write
+// succeeded. Both labels remain recognizable until the task record commits.
+func saveCrewRename(file string, entries map[string]crewRenameEntry) error {
+	data, err := json.Marshal(entries)
+	if err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp(filepath.Dir(file), ".crew-rename-")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(tmp.Name())
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmp.Name(), file)
 }

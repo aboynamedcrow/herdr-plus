@@ -1,0 +1,8 @@
+{
+  "event": "workspace_renamed",
+  "data": {
+    "type": "workspace_renamed",
+    "workspace_id": "w68",
+    "label": "Rename fixture after"
+  }
+}

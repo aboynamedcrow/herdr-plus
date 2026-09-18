@@ -1650,6 +1650,18 @@ func TestRegisterPrimaryCheckoutRefusesChangedOwnership(t *testing.T) {
 	}
 }
 
+func TestRegisterPrimaryCheckoutExplainsUnrecordedLinkedCheckout(t *testing.T) {
+	repo := newGitRepo(t)
+	linked := addWorktree(t, repo, "feature")
+	f := newNativeFixture(t)
+	f.labels["wOLD"] = "Linked shell"
+	err := registerPrimaryCheckout(f.client(), "wOLD", gitCheckout{Path: linked, Primary: linked})
+	if err == nil || !strings.Contains(err.Error(), "linked checkout") || !strings.Contains(err.Error(), repo) {
+		t.Fatalf("missing linked-checkout remedy: %v", err)
+	}
+	f.assertNoMutations()
+}
+
 func TestRegisterPrimaryCheckoutPreservesConflictingRecord(t *testing.T) {
 	repo, other := newGitRepo(t), newGitRepo(t)
 	checkout, err := resolveGitCheckout(repo)

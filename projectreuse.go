@@ -473,6 +473,16 @@ func registerPrimaryCheckout(client *herdrClient, id string, checkout gitCheckou
 	if !workspaceIDPattern.MatchString(id) || !samePath(checkout.Path, checkout.Primary) {
 		return fmt.Errorf("cannot register an ambiguous primary checkout")
 	}
+	actual, err := resolveGitCheckout(checkout.Path)
+	if err != nil {
+		return err
+	}
+	if actual == nil {
+		return fmt.Errorf("the selected directory is not a checkout root")
+	}
+	if !samePath(actual.Path, actual.Primary) {
+		return fmt.Errorf("workspace %s has an unrecorded linked checkout at %s. Open the primary project at %s, then open this checkout through Herdr worktree open. No workspace changed", id, actual.Path, actual.Primary)
+	}
 	ws, err := client.workspaceGet(id)
 	if err != nil {
 		return err

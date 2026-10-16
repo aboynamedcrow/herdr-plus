@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 )
@@ -75,9 +76,13 @@ func syncCrewName(client *herdrClient, id string) error {
 	}
 	old := ws.Tokens["crew_task"]
 	task := strings.Join(strings.Fields(ws.Label), " ")
-	if old == "" || task == "" || (task == old && len(journal) == 0) {
+	if old == "" || task == "" {
 		return nil
 	}
+	// Herdr caps a token at 80 characters, and older task starts named some
+	// labels from the raw ask. A label for the same issue therefore can differ
+	// from crew_task, so the issue ID also marks a label as derived.
+	issue := crewIssue(task)
 	tabs, err := client.tabList(id)
 	if err != nil {
 		return err
@@ -87,12 +92,21 @@ func syncCrewName(client *herdrClient, id string) error {
 		return err
 	}
 	for _, tab := range tabs {
-		for _, role := range []string{"crew", "usage", "workers"} {
-			if tab.TabID != ws.Tokens["crew_"+role+"_tab"] {
-				continue
+		prefix := ""
+		for role, label := range map[string]string{"crew": "Crew", "usage": "Usage", "workers": "Workers"} {
+			if tab.TabID == ws.Tokens["crew_"+role+"_tab"] {
+				prefix = label
 			}
-			prefix := map[string]string{"crew": "Crew", "usage": "Usage", "workers": "Workers"}[role]
-			if !crewDerivedLabel(tab.Label, prefix+" · "+old, journal[tab.TabID]) {
+		}
+		if head, _, _ := strings.Cut(tab.Label, " · "); prefix == "" && crewTabPrefixes[head] {
+			prefix = head
+		}
+		if prefix != "" {
+			suffix, derived := crewJournalSuffix(tab.Label, journal[tab.TabID]), crewDerivedLabel(tab.Label, prefix+" · "+old, journal[tab.TabID])
+			if !derived {
+				suffix, derived = crewIssueLabel(tab.Label, prefix, issue)
+			}
+			if !derived {
 				continue
 			}
 			current, err := client.tabGet(tab.TabID)
@@ -102,11 +116,11 @@ func syncCrewName(client *herdrClient, id string) error {
 			if current.WorkspaceID != id || current.TabID != tab.TabID || current.Label != tab.Label {
 				continue
 			}
-			next := prefix + " · " + task
+			next := crewLabel(prefix, task, suffix)
 			if next == tab.Label {
 				continue
 			}
-			journal[tab.TabID] = crewRenameEntry{Before: tab.Label, After: next}
+			journal[tab.TabID] = crewRenameEntry{Before: tab.Label, After: next, Suffix: suffix}
 			if err := saveCrewRename(journalPath, journal); err != nil {
 				return err
 			}
@@ -128,7 +142,18 @@ func syncCrewName(client *herdrClient, id string) error {
 		if role := pane.Tokens["crew_worker_role"]; role != "" && pane.Tokens["crew_role_number"] != "" {
 			prefix = role + " " + pane.Tokens["crew_role_number"]
 		}
-		if prefix == "" || !crewDerivedLabel(pane.Label, prefix+" · "+old, journal[pane.PaneID]) {
+		// A dispatch names a seat pane "<Role> <n> · <task> · <provider> <model> <effort>" with no tokens.
+		if head, _, _ := strings.Cut(pane.Label, " · "); prefix == "" && (crewPanePrefixes[head] || crewSeatPrefix.MatchString(head)) {
+			prefix = head
+		}
+		if prefix == "" {
+			continue
+		}
+		suffix, derived := crewJournalSuffix(pane.Label, journal[pane.PaneID]), crewDerivedLabel(pane.Label, prefix+" · "+old, journal[pane.PaneID])
+		if !derived {
+			suffix, derived = crewIssueLabel(pane.Label, prefix, issue)
+		}
+		if !derived {
 			continue
 		}
 		current, err := client.paneGet(pane.PaneID)
@@ -138,11 +163,11 @@ func syncCrewName(client *herdrClient, id string) error {
 		if current.WorkspaceID != id || current.PaneID != pane.PaneID || current.Label != pane.Label {
 			continue
 		}
-		next := prefix + " · " + task
+		next := crewLabel(prefix, task, suffix)
 		if next == pane.Label {
 			continue
 		}
-		journal[pane.PaneID] = crewRenameEntry{Before: pane.Label, After: next}
+		journal[pane.PaneID] = crewRenameEntry{Before: pane.Label, After: next, Suffix: suffix}
 		if err := saveCrewRename(journalPath, journal); err != nil {
 			return err
 		}
@@ -161,9 +186,54 @@ func syncCrewName(client *herdrClient, id string) error {
 	return nil
 }
 
+// Task commands add these tabs and panes without role tokens.
+var (
+	crewTabPrefixes  = map[string]bool{"Workers": true, "Archive": true, "Review": true}
+	crewPanePrefixes = map[string]bool{"Orchestrator": true, "Memory": true, "Issue / Utility": true, "Usage": true}
+	crewSeatPrefix   = regexp.MustCompile(`^[A-Z][a-z]+ [1-9][0-9]*$`)
+	crewIssueID      = regexp.MustCompile(`^[A-Z][A-Z0-9]*-[1-9][0-9]*$`)
+)
+
+// crewIssue returns the issue ID that starts a task name, or "".
+func crewIssue(task string) string {
+	if first, _, _ := strings.Cut(task, " "); crewIssueID.MatchString(first) {
+		return first
+	}
+	return ""
+}
+
+// crewIssueLabel reports whether a label has the form
+// "<prefix> · <issue> <name>[ · <suffix>]" and returns the suffix.
+// A label with the bare issue ID and no name is not derived from the task.
+func crewIssueLabel(label, prefix, issue string) (string, bool) {
+	rest, found := strings.CutPrefix(label, prefix+" · ")
+	if !found || issue == "" {
+		return "", false
+	}
+	name, suffix, _ := strings.Cut(rest, " · ")
+	return suffix, strings.HasPrefix(name, issue+" ")
+}
+
+func crewLabel(prefix, task, suffix string) string {
+	if suffix == "" {
+		return prefix + " · " + task
+	}
+	return prefix + " · " + task + " · " + suffix
+}
+
 type crewRenameEntry struct {
 	Before string `json:"before"`
 	After  string `json:"after"`
+	// Suffix is the seat suffix that the rename kept. A retry that finds the
+	// label by this entry keeps it again.
+	Suffix string `json:"suffix,omitempty"`
+}
+
+func crewJournalSuffix(label string, pending crewRenameEntry) string {
+	if label != "" && (label == pending.Before || label == pending.After) {
+		return pending.Suffix
+	}
+	return ""
 }
 
 func crewDerivedLabel(label, previous string, pending crewRenameEntry) bool {

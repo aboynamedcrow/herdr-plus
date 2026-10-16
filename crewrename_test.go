@@ -297,3 +297,44 @@ func TestCrewRenameMatchesLabelsPastTheTokenCap(t *testing.T) {
 		t.Fatalf("tab=%q pane=%q", tab, pane)
 	}
 }
+
+// A retry after a failed metadata write finds the seat pane by its journal
+// entry. It must keep the provider suffix.
+func TestCrewRenameRetryKeepsTheSeatSuffix(t *testing.T) {
+	f := startFakeHerdr(t)
+	recorded, task := "ENG-5663 old-name", "ENG-5663 new-name"
+	pane := "Reviewer 3 · ENG-5663 old-name · claude claude-fable-5-1 high"
+	fail := true
+	f.handleFunc("workspace.get", func(r request) (any, *herdrError) {
+		return map[string]any{"workspace": workspaceInfo{WorkspaceID: "w1", Label: task, Tokens: map[string]string{"crew_task": recorded}}}, nil
+	})
+	f.handle("tab.list", map[string]any{"tabs": []tabInfo{}})
+	f.handleFunc("pane.list", func(r request) (any, *herdrError) {
+		return map[string]any{"panes": []paneInfo{{PaneID: "w1:p4", TabID: "w1:t2", WorkspaceID: "w1", Label: pane}}}, nil
+	})
+	f.handleFunc("pane.get", func(r request) (any, *herdrError) {
+		return map[string]any{"pane": paneInfo{PaneID: "w1:p4", TabID: "w1:t2", WorkspaceID: "w1", Label: pane}}, nil
+	})
+	f.handleFunc("pane.rename", func(r request) (any, *herdrError) { pane = fmt.Sprint(r.Params["label"]); return map[string]any{}, nil })
+	f.handleFunc("workspace.report_metadata", func(r request) (any, *herdrError) {
+		if fail {
+			return nil, &herdrError{Code: "injected", Message: "test failure"}
+		}
+		recorded = r.Params["tokens"].(map[string]any)["crew_task"].(string)
+		return map[string]any{}, nil
+	})
+	c, err := newHerdrClient()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := syncCrewName(c, "w1"); err == nil {
+		t.Fatal("expected injected failure")
+	}
+	fail = false
+	if err := syncCrewName(c, "w1"); err != nil {
+		t.Fatal(err)
+	}
+	if want := "Reviewer 3 · " + task + " · claude claude-fable-5-1 high"; pane != want || recorded != task {
+		t.Fatalf("pane=%q recorded=%q", pane, recorded)
+	}
+}

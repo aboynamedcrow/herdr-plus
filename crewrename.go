@@ -102,7 +102,7 @@ func syncCrewName(client *herdrClient, id string) error {
 			prefix = head
 		}
 		if prefix != "" {
-			suffix, derived := "", crewDerivedLabel(tab.Label, prefix+" · "+old, journal[tab.TabID])
+			suffix, derived := crewJournalSuffix(tab.Label, journal[tab.TabID]), crewDerivedLabel(tab.Label, prefix+" · "+old, journal[tab.TabID])
 			if !derived {
 				suffix, derived = crewIssueLabel(tab.Label, prefix, issue)
 			}
@@ -120,7 +120,7 @@ func syncCrewName(client *herdrClient, id string) error {
 			if next == tab.Label {
 				continue
 			}
-			journal[tab.TabID] = crewRenameEntry{Before: tab.Label, After: next}
+			journal[tab.TabID] = crewRenameEntry{Before: tab.Label, After: next, Suffix: suffix}
 			if err := saveCrewRename(journalPath, journal); err != nil {
 				return err
 			}
@@ -149,7 +149,7 @@ func syncCrewName(client *herdrClient, id string) error {
 		if prefix == "" {
 			continue
 		}
-		suffix, derived := "", crewDerivedLabel(pane.Label, prefix+" · "+old, journal[pane.PaneID])
+		suffix, derived := crewJournalSuffix(pane.Label, journal[pane.PaneID]), crewDerivedLabel(pane.Label, prefix+" · "+old, journal[pane.PaneID])
 		if !derived {
 			suffix, derived = crewIssueLabel(pane.Label, prefix, issue)
 		}
@@ -167,7 +167,7 @@ func syncCrewName(client *herdrClient, id string) error {
 		if next == pane.Label {
 			continue
 		}
-		journal[pane.PaneID] = crewRenameEntry{Before: pane.Label, After: next}
+		journal[pane.PaneID] = crewRenameEntry{Before: pane.Label, After: next, Suffix: suffix}
 		if err := saveCrewRename(journalPath, journal); err != nil {
 			return err
 		}
@@ -224,6 +224,16 @@ func crewLabel(prefix, task, suffix string) string {
 type crewRenameEntry struct {
 	Before string `json:"before"`
 	After  string `json:"after"`
+	// Suffix is the seat suffix that the rename kept. A retry that finds the
+	// label by this entry keeps it again.
+	Suffix string `json:"suffix,omitempty"`
+}
+
+func crewJournalSuffix(label string, pending crewRenameEntry) string {
+	if label != "" && (label == pending.Before || label == pending.After) {
+		return pending.Suffix
+	}
+	return ""
 }
 
 func crewDerivedLabel(label, previous string, pending crewRenameEntry) bool {

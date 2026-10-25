@@ -338,3 +338,173 @@ func TestCrewRenameRetryKeepsTheSeatSuffix(t *testing.T) {
 		t.Fatalf("pane=%q recorded=%q", pane, recorded)
 	}
 }
+
+// crewRenameFake serves one workspace whose tabs and panes the renames change.
+// It returns the rename calls for each sync.
+func crewRenameFake(t *testing.T, label, recorded *string, tokens map[string]string, tabs, panes map[string]string, tabOrder, paneOrder []string) *fakeHerdr {
+	f := startFakeHerdr(t)
+	f.handleFunc("workspace.get", func(r request) (any, *herdrError) {
+		all := map[string]string{"crew_task": *recorded}
+		for k, v := range tokens {
+			all[k] = v
+		}
+		return map[string]any{"workspace": workspaceInfo{WorkspaceID: "w1", Label: *label, Tokens: all}}, nil
+	})
+	f.handleFunc("tab.list", func(r request) (any, *herdrError) {
+		list := []tabInfo{}
+		for _, id := range tabOrder {
+			list = append(list, tabInfo{TabID: id, WorkspaceID: "w1", Label: tabs[id]})
+		}
+		return map[string]any{"tabs": list}, nil
+	})
+	f.handleFunc("tab.get", func(r request) (any, *herdrError) {
+		id := r.Params["tab_id"].(string)
+		return map[string]any{"tab": tabInfo{TabID: id, WorkspaceID: "w1", Label: tabs[id]}}, nil
+	})
+	f.handleFunc("pane.list", func(r request) (any, *herdrError) {
+		list := []paneInfo{}
+		for _, id := range paneOrder {
+			list = append(list, paneInfo{PaneID: id, TabID: "w1:t1", WorkspaceID: "w1", Label: panes[id]})
+		}
+		return map[string]any{"panes": list}, nil
+	})
+	f.handleFunc("pane.get", func(r request) (any, *herdrError) {
+		id := r.Params["pane_id"].(string)
+		return map[string]any{"pane": paneInfo{PaneID: id, TabID: "w1:t1", WorkspaceID: "w1", Label: panes[id]}}, nil
+	})
+	f.handleFunc("tab.rename", func(r request) (any, *herdrError) {
+		tabs[r.Params["tab_id"].(string)] = fmt.Sprint(r.Params["label"])
+		return map[string]any{}, nil
+	})
+	f.handleFunc("pane.rename", func(r request) (any, *herdrError) {
+		panes[r.Params["pane_id"].(string)] = fmt.Sprint(r.Params["label"])
+		return map[string]any{}, nil
+	})
+	f.handleFunc("workspace.report_metadata", func(r request) (any, *herdrError) {
+		*recorded = r.Params["tokens"].(map[string]any)["crew_task"].(string)
+		return map[string]any{}, nil
+	})
+	return f
+}
+
+func crewRenameCount(f *fakeHerdr) int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	n := 0
+	for _, r := range f.calls {
+		if r.Method == "tab.rename" || r.Method == "pane.rename" {
+			n++
+		}
+	}
+	return n
+}
+
+// dot names new Workers and Archive tabs with the short task. A retitle keeps
+// them short. Other tabs and all panes get the full task.
+func TestCrewRenameKeepsWorkersAndArchiveShort(t *testing.T) {
+	old := "IC-1375 One intake pipeline for every request"
+	task := "IC-1375 One intake pipeline for Slack and Linear asks"
+	shortOld, shortTask := "IC-1375 One intake pipeline for e…", "IC-1375 One intake pipeline for S…"
+	label, recorded := task, old
+	tabs := map[string]string{
+		"w1:t1": "Crew · " + old,
+		"w1:t2": "Workers · " + old,
+		"w1:t3": "Archive · " + old,
+		"w1:t4": "Archive · " + shortOld,
+		"w1:t5": "Review · " + old,
+		"w1:t6": "Workers · IC-9 🧌 another-issue-with-a-long-title",
+	}
+	panes := map[string]string{
+		"w1:p1": "Orchestrator · " + old,
+		"w1:p2": "Implementer 2 · " + old + " · codex gpt-6-sol high",
+	}
+	tokens := map[string]string{"crew_crew_tab": "w1:t1", "crew_workers_tab": "w1:t2", "crew_orchestrator_pane": "w1:p1"}
+	f := crewRenameFake(t, &label, &recorded, tokens, tabs, panes,
+		[]string{"w1:t1", "w1:t2", "w1:t3", "w1:t4", "w1:t5", "w1:t6"}, []string{"w1:p1", "w1:p2"})
+	c, err := newHerdrClient()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := syncCrewName(c, "w1"); err != nil {
+		t.Fatal(err)
+	}
+	wantTabs := map[string]string{
+		"w1:t1": "Crew · " + task,
+		"w1:t2": "Workers · " + shortTask,
+		"w1:t3": "Archive · " + shortTask,
+		"w1:t4": "Archive · " + shortTask,
+		"w1:t5": "Review · " + task,
+		"w1:t6": "Workers · IC-9 🧌 another-issue-with-a-long-title",
+	}
+	wantPanes := map[string]string{
+		"w1:p1": "Orchestrator · " + task,
+		"w1:p2": "Implementer 2 · " + task + " · codex gpt-6-sol high",
+	}
+	for id, want := range wantTabs {
+		if tabs[id] != want {
+			t.Errorf("tab %s = %q, want %q", id, tabs[id], want)
+		}
+	}
+	for id, want := range wantPanes {
+		if panes[id] != want {
+			t.Errorf("pane %s = %q, want %q", id, panes[id], want)
+		}
+	}
+	if recorded != task {
+		t.Fatalf("recorded = %q", recorded)
+	}
+	// A rename to the same name leaves the short labels as they are.
+	before := crewRenameCount(f)
+	if err := syncCrewName(c, "w1"); err != nil {
+		t.Fatal(err)
+	}
+	if n := crewRenameCount(f) - before; n != 0 {
+		t.Fatalf("same-name rename wrote %d labels", n)
+	}
+	for id, want := range wantTabs {
+		if tabs[id] != want {
+			t.Errorf("after same-name rename, tab %s = %q, want %q", id, tabs[id], want)
+		}
+	}
+}
+
+// A task with no issue ID has no issue match, so only the short form of the
+// old task marks the label as derived.
+func TestCrewRenameFindsShortLabelWithoutIssue(t *testing.T) {
+	old := "make the onboarding flow faster for new users"
+	task := "make onboarding faster for every new user"
+	label, recorded := task, old
+	tabs := map[string]string{
+		"w1:t1": "Crew · " + old,
+		"w1:t2": "Workers · make the onboarding flow…",
+		"w1:t3": "Archive · " + old,
+		"w1:t4": "Workers · make the onboarding flow at…",
+	}
+	f := crewRenameFake(t, &label, &recorded, map[string]string{"crew_crew_tab": "w1:t1"}, tabs, map[string]string{},
+		[]string{"w1:t1", "w1:t2", "w1:t3", "w1:t4"}, nil)
+	c, err := newHerdrClient()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := syncCrewName(c, "w1"); err != nil {
+		t.Fatal(err)
+	}
+	wantTabs := map[string]string{
+		"w1:t1": "Crew · " + task,
+		"w1:t2": "Workers · make onboarding faster fo…",
+		"w1:t3": "Archive · make onboarding faster fo…",
+		"w1:t4": "Workers · make the onboarding flow at…",
+	}
+	for id, want := range wantTabs {
+		if tabs[id] != want {
+			t.Errorf("tab %s = %q, want %q", id, tabs[id], want)
+		}
+	}
+	before := crewRenameCount(f)
+	if err := syncCrewName(c, "w1"); err != nil {
+		t.Fatal(err)
+	}
+	if n := crewRenameCount(f) - before; n != 0 {
+		t.Fatalf("same-name rename wrote %d labels", n)
+	}
+}

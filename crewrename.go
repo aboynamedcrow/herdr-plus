@@ -103,6 +103,13 @@ func syncCrewName(client *herdrClient, id string) error {
 		}
 		if prefix != "" {
 			suffix, derived := crewJournalSuffix(tab.Label, journal[tab.TabID]), crewDerivedLabel(tab.Label, prefix+" · "+old, journal[tab.TabID])
+			// dot names Workers and Archive tabs with the short task, also when
+			// the task has no issue ID.
+			name := task
+			if crewShortTabs[prefix] {
+				name = crewShortTask(task)
+				derived = derived || tab.Label == prefix+" · "+crewShortTask(old)
+			}
 			if !derived {
 				suffix, derived = crewIssueLabel(tab.Label, prefix, issue)
 			}
@@ -116,7 +123,7 @@ func syncCrewName(client *herdrClient, id string) error {
 			if current.WorkspaceID != id || current.TabID != tab.TabID || current.Label != tab.Label {
 				continue
 			}
-			next := crewLabel(prefix, task, suffix)
+			next := crewLabel(prefix, name, suffix)
 			if next == tab.Label {
 				continue
 			}

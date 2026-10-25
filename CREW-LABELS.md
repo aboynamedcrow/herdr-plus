@@ -47,5 +47,18 @@ The role is a role token, or one of these label prefixes:
 - Panes: `Orchestrator`, `Memory`, `Issue / Utility`, `Usage`, or `<Role> <n>`.
 
 The rename keeps the suffix. A bare `<role> · <issue ID>` label stays unchanged.
+
+`Workers` and `Archive` tabs get `<role> · <short task>`, with the optional suffix.
+All other tabs and all panes get the full task.
+The short task follows dot `bin/task_tab_title.py`:
+
+- The issue ID stays in full. So does a marker after it, `🧌` or `🧙‍♂️`.
+- The rest stays when it has 25 grapheme clusters or fewer.
+- Otherwise the rename keeps the first 25 clusters and removes trailing space.
+  Then it adds `…`.
+- A task with no issue ID has no marker. Its whole name is the rest.
+
+A `Workers` or `Archive` label that equals `<role> · <short crew_task>` is a task label.
+This rule also finds the label of a task with no issue ID.
 A label for another issue also stays unchanged.
 A rename to the same name repairs labels that an earlier rename missed.

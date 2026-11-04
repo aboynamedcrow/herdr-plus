@@ -33,7 +33,7 @@ An approved lane exemption must meet `REVIEW.md`. Green checks alone grant no au
    Failed or pending required checks block. Resolve a missing declared check explicitly.
    For UNKNOWN mergeability, read again after five seconds. Stop after three reads. CONFLICTING blocks.
 3. Fetch `origin/main` and `origin/<branch>`. Follow create-pr's remote-work preservation rule.
-   Count missing base commits with `git rev-list --count <head>..origin/main`.
+   Check that the head contains main with `git merge-base --is-ancestor origin/main <head>`. Exit 1 means main moved.
 4. When main moved after the last clean round, rebase and push. Record the old and new bases and heads.
    A rebase changes the target, so it invalidates both verdicts.
    Send the new fingerprint to both lanes in the same seats. Merge only after both are clean there.
@@ -52,15 +52,18 @@ An approved lane exemption must meet `REVIEW.md`. Green checks alone grant no au
 
 ## Merge
 
-Run the behind check as a gate immediately before the merge. Replace both placeholders with checked values.
+Run the ancestor check as a gate immediately before the merge. `<branch>` is the PR branch name. Replace the placeholders with checked values.
+Keep the command on one line, so no runner can split it:
 
 ```sh
-git fetch origin main && \
-  [ "$(git rev-list --count <head>..origin/main)" -eq 0 ] && \
-  gh pr merge <N> --repo aboynamedcrow/herdr-plus --merge --match-head-commit <head>
+git fetch origin main <branch> && git merge-base --is-ancestor origin/main <head> && gh pr merge <N> --repo aboynamedcrow/herdr-plus --merge --match-head-commit <head>
 ```
 
-The fetch runs in the same command, so the count reads the current main. A failed fetch stops the merge.
+The fetch also brings the PR head. `git merge-base --is-ancestor` exits 0 only when the head contains the current main.
+It exits 1 for a stale head and 128 for a missing commit, so the merge stops in bash, sh and zsh.
+Do not use a count test such as `[ "$(git rev-list --count ...)" -eq 0 ]`. zsh reads an empty count as 0.
+The check must gate the merge. Never print it with `echo` before the merge.
+A failed fetch stops the merge.
 Read the result:
 `gh pr view <N> --repo aboynamedcrow/herdr-plus --json state,mergedAt,mergeCommit`.
 

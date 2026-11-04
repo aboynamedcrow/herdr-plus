@@ -35,11 +35,11 @@ An approved lane exemption must meet `REVIEW.md`. Green checks alone grant no au
 3. Fetch `origin/main` and `origin/<branch>`. Follow create-pr's remote-work preservation rule.
    Count missing base commits with `git rev-list --count <head>..origin/main`.
 4. When main moved after the last clean round, rebase and push. Record the old and new bases and heads.
-   Keep verdicts only when all three conditions hold:
-   - `git range-diff <old-base>..<old-head> <new-base>..<new-head>` shows equal patches.
-   - The new main commits share no changed file with the PR.
-   - CI passes at the new head.
-   Otherwise restart both lanes at the new fingerprint. Refresh affected QA.
+   A rebase changes the target, so it invalidates both verdicts.
+   Send the new fingerprint to both lanes in the same seats. Merge only after both are clean there.
+   `git range-diff <old-base>..<old-head> origin/main..<new-head>` can narrow the next round. It never replaces a verdict.
+   Only a recorded designation that covers this PR can keep old verdicts.
+   Source: the engine's `docs/PR-WORKFLOW.md`, "Review before merge". Refresh affected QA.
 5. Check the current workflow states:
    `gh api repos/aboynamedcrow/herdr-plus/actions/workflows --jq '.workflows[] | {name,path,state}'`.
    Read `.github/workflows/release.yml`, `.goreleaser.yml`, and `.github/workflows/site.yml` for effects.
@@ -55,10 +55,12 @@ An approved lane exemption must meet `REVIEW.md`. Green checks alone grant no au
 Run the behind check as a gate immediately before the merge. Replace both placeholders with checked values.
 
 ```sh
-[ "$(git rev-list --count <head>..origin/main)" -eq 0 ] && \
+git fetch origin main && \
+  [ "$(git rev-list --count <head>..origin/main)" -eq 0 ] && \
   gh pr merge <N> --repo aboynamedcrow/herdr-plus --merge --match-head-commit <head>
 ```
 
+The fetch runs in the same command, so the count reads the current main. A failed fetch stops the merge.
 Read the result:
 `gh pr view <N> --repo aboynamedcrow/herdr-plus --json state,mergedAt,mergeCommit`.
 

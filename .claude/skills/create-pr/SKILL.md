@@ -38,10 +38,10 @@ description: Use when creating or updating a herdr-plus PR with checks and behav
 9. Inspect the actual title and body. When available, run `python3 ~/.agents/bin/ste-lint.py <body-file>`.
    Fix every hard prose finding. Preserve literal commands and paths.
 10. Commit. Push the branch. Use a draft while work remains incomplete.
-    Create with `gh pr create --repo aboynamedcrow/herdr-plus --base main --body-file <body-file>`.
+    Create with `gh pr create --repo aboynamedcrow/herdr-plus --base main --title "<title>" --body-file <body-file>`.
 11. Read the saved record after each create or edit:
     `gh pr view <N> --repo aboynamedcrow/herdr-plus --json title,body,headRefOid`.
-12. Run `harkness label model --pr <N>` after opening the PR.
+12. Run `harkness label model --pr <N> --repo aboynamedcrow/herdr-plus` after opening the PR.
     This command belongs to the operator's review tools. Report missing tools to the task root.
 13. Use [review-pr](../review-pr/SKILL.md) for review and [iterate-fixups](../iterate-fixups/SKILL.md) for fixes.
 

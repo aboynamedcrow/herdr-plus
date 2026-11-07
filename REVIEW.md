@@ -1,7 +1,7 @@
 # Review priorities for herdr-plus
 
 This file is the repository's review rubric. The review prompt must include it verbatim.
-Use [.claude/skills/review-pr/SKILL.md](.claude/skills/review-pr/SKILL.md) for reports and the exact verdict line.
+Use [PR checks](docs/PR-CHECKS.md#review-a-pr) for reports and the exact verdict line.
 
 ## Operator model
 
@@ -111,4 +111,4 @@ Never send to a real person or external target during QA unless the task brief l
 
 Secrets remain findings even when a scan exists. Never copy an exposed value into a report.
 The PR body records evidence. A stale number is S3. Concealed defects or invented evidence are S1.
-Merge authority belongs to [merge-pr](.claude/skills/merge-pr/SKILL.md), separately from review acceptance.
+Merge authority belongs to [PR checks](docs/PR-CHECKS.md#merge-a-pr), separately from review acceptance.

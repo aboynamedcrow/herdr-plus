@@ -396,19 +396,39 @@ func planWorktree(req worktreeRequest) (worktreePlan, error) {
 		}
 		heads[name] = oid
 	}
-	paths := map[string]string{}
+	isCandidate := func(name string) bool {
+		if req.Issue != "" {
+			return matchesIssue(name, req.Issue)
+		}
+		return name == branch || name == req.Name
+	}
+	checkouts := map[string][]string{}
+	var registered []string
 	for _, record := range records {
 		if record.Ref == "" {
 			continue
 		}
 		name := strings.TrimPrefix(record.Ref, "refs/heads/")
-		if _, exists := paths[name]; exists {
-			return plan, errors.New("ambiguous registered branch checkouts")
+		if checkouts[name] == nil {
+			registered = append(registered, name)
+		}
+		checkouts[name] = append(checkouts[name], record.Path)
+	}
+	// Registry faults on branches this request cannot select belong to other
+	// work. Refusing them would block every plan in the repository.
+	paths := map[string]string{}
+	for _, name := range registered {
+		if !isCandidate(name) {
+			continue
+		}
+		found := checkouts[name]
+		if len(found) > 1 {
+			return plan, fmt.Errorf("ambiguous registered branch checkouts: %s is checked out at %s", name, strings.Join(found, " and "))
 		}
 		if _, exists := heads[name]; !exists {
-			return plan, errors.New("worktree registry disagrees with local branches")
+			return plan, fmt.Errorf("worktree registry disagrees with local branches: %s is registered at %s but has no local branch", name, found[0])
 		}
-		paths[name] = record.Path
+		paths[name] = found[0]
 	}
 	plan = worktreePlan{Version: 1, Project: policy.Name, Repository: primary, Issue: strings.ToUpper(req.Issue), Candidates: []worktreeChoice{}}
 	remoteHeads, remoteErr := policyRemoteHeads(primary)
@@ -417,6 +437,9 @@ func planWorktree(req worktreeRequest) (worktreePlan, error) {
 		plan.RemoteState = "UNKNOWN"
 	}
 	occupied := map[string]string{}
+	for _, name := range registered {
+		occupied[name] = ""
+	}
 	for name, oid := range remoteHeads {
 		occupied[name] = oid
 	}
@@ -426,10 +449,7 @@ func planWorktree(req worktreeRequest) (worktreePlan, error) {
 	finished := false
 	unfinished := false
 	for name := range heads {
-		if req.Issue != "" && !matchesIssue(name, req.Issue) {
-			continue
-		}
-		if req.Issue == "" && name != branch && name != req.Name {
+		if !isCandidate(name) {
 			continue
 		}
 		path, checkedOut := paths[name]
@@ -449,7 +469,7 @@ func planWorktree(req worktreeRequest) (worktreePlan, error) {
 		if _, local := heads[name]; local {
 			continue
 		}
-		if (req.Issue != "" && !matchesIssue(name, req.Issue)) || (req.Issue == "" && name != branch && name != req.Name) {
+		if !isCandidate(name) {
 			continue
 		}
 		choice := worktreeChoice{Branch: name, Path: filepath.Join(policy.Root, strings.ReplaceAll(name, "/", "--")),

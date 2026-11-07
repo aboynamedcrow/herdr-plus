@@ -501,6 +501,19 @@ to `apply-worktree`. It rebuilds the plan, refuses stale or absent selections, a
 delegates native creation/opening to `ensure-worktree`. Its `result` preserves the
 native workspace, pane and checkout fields. Cancelling means never invoking apply.
 
+Planning refuses two Git registry faults only on a candidate branch. A candidate
+matches the requested issue. Without `--issue`, an issue at the start of the name
+sets that issue. Without any issue, a candidate matches the requested name or the
+derived branch.
+
+- Two or more worktrees check out one branch.
+- A registered checkout whose branch has no local ref.
+
+The refusal names the branch and each checkout path. The plan ignores a fault on
+another branch. A new branch never reuses a registered branch name.
+Tests: `TestPolicyRefusesRegistryFaultsOnlyOnCandidateBranches` and
+`TestPolicyNewBranchAvoidsAnOrphanRegistration` in `worktreepolicy_test.go`.
+
 The W action requires Herdr's explicit invoking-pane context and opens a temporary
 overlay picker. It never chooses a project from another client's current focus: the
 checkout it plans against is the verified invoking pane's, and an invoking pane that

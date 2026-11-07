@@ -502,8 +502,9 @@ delegates native creation/opening to `ensure-worktree`. Its `result` preserves t
 native workspace, pane and checkout fields. Cancelling means never invoking apply.
 
 Planning refuses two Git registry faults only on a candidate branch. A candidate
-matches the requested issue. Without an issue, it matches the requested name or
-the derived branch.
+matches the requested issue. Without `--issue`, an issue at the start of the name
+sets that issue. Without any issue, a candidate matches the requested name or the
+derived branch.
 
 - Two or more worktrees check out one branch.
 - A registered checkout whose branch has no local ref.

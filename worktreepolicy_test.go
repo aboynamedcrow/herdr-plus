@@ -618,3 +618,84 @@ func TestPolicyApplyRegistersMissingParentProvenance(t *testing.T) {
 	f.assertNotCalled("workspace.create")
 	f.assertNotCalled("pane.split")
 }
+
+func TestPolicyRefusesRegistryFaultsOnlyOnCandidateBranches(t *testing.T) {
+	duplicate := func(t *testing.T, repo, branch string) []string {
+		first := addWorktree(t, repo, branch)
+		parent, err := filepath.EvalSymlinks(t.TempDir())
+		if err != nil {
+			t.Fatal(err)
+		}
+		second := filepath.Join(parent, "second")
+		runGit(t, repo, "worktree", "add", "-f", second, branch)
+		return []string{first, second}
+	}
+	orphan := func(t *testing.T, repo, branch string) []string {
+		path := addWorktree(t, repo, branch)
+		runGit(t, repo, "update-ref", "-d", "refs/heads/"+branch)
+		return []string{path}
+	}
+	for _, tc := range []struct {
+		name    string
+		fault   func(*testing.T, string, string) []string
+		branch  string
+		request worktreeRequest
+		refusal string
+	}{
+		{"duplicate on another branch", duplicate, "ingwon/ic-900-other", worktreeRequest{Name: "new work", Issue: "IC-177"}, ""},
+		{"duplicate on another branch without issue", duplicate, "ingwon/ic-900-other", worktreeRequest{Name: "brand new"}, ""},
+		{"duplicate on the issue branch", duplicate, "team/ic-177-dup", worktreeRequest{Name: "new work", Issue: "IC-177"}, "ambiguous registered branch checkouts"},
+		{"duplicate on the requested name", duplicate, "cleanup", worktreeRequest{Name: "cleanup"}, "ambiguous registered branch checkouts"},
+		{"duplicate on the derived branch", duplicate, "ingwon/brand-new", worktreeRequest{Name: "Brand New"}, "ambiguous registered branch checkouts"},
+		{"orphan on another branch", orphan, "ingwon/ic-900-other", worktreeRequest{Name: "new work", Issue: "IC-177"}, ""},
+		{"orphan on the issue branch", orphan, "team/ic-177-gone", worktreeRequest{Name: "new work", Issue: "IC-177"}, "worktree registry disagrees with local branches"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			repo, _ := policyFixture(t)
+			paths := tc.fault(t, repo, tc.branch)
+			tc.request.Cwd = repo
+			plan, err := planWorktree(tc.request)
+			if tc.refusal == "" {
+				if err != nil {
+					t.Fatalf("a fault on %s blocked an unrelated plan: %v", tc.branch, err)
+				}
+				for _, c := range plan.Candidates {
+					if c.Branch == tc.branch {
+						t.Fatalf("faulted branch became a candidate: %+v", c)
+					}
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("plan accepted a fault on candidate %s: %+v", tc.branch, plan)
+			}
+			for _, want := range append([]string{tc.refusal, tc.branch}, paths...) {
+				if !strings.Contains(err.Error(), want) {
+					t.Fatalf("refusal %q does not name %q", err, want)
+				}
+			}
+		})
+	}
+}
+
+func TestPolicyNewBranchAvoidsAnOrphanRegistration(t *testing.T) {
+	repo, _ := policyFixture(t)
+	runGit(t, repo, "branch", "ingwon/brand-new")
+	merged := runGit(t, repo, "rev-parse", "ingwon/brand-new")
+	policyPullRequest = func(string, string) branchPull { return branchPull{State: "MERGED", Head: merged} }
+	addWorktree(t, repo, "ingwon/brand-new-2")
+	runGit(t, repo, "update-ref", "-d", "refs/heads/ingwon/brand-new-2")
+	plan, err := planWorktree(worktreeRequest{Cwd: repo, Name: "Brand New"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range plan.Candidates {
+		if c.Source == "new" {
+			if c.Branch == "ingwon/brand-new-2" {
+				t.Fatalf("new branch reused an orphan registration: %+v", c)
+			}
+			return
+		}
+	}
+	t.Fatalf("plan offered no new branch: %+v", plan)
+}
